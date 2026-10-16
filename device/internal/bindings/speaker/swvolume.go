@@ -111,3 +111,45 @@ func (v *softVolume) applyFloat(in []float64, out []byte, tgt float64) {
 // settle takes the target without a ramp, for a period of silence, where
 // there is nothing to click.
 func (v *softVolume) settle() { v.cur = v.targetGain() }
+
+// The stock-sound profile's volume law (em_volume.stock_level_db, #229):
+// stock FireOS's 31-step table interpolated by percent, plus its level steps
+// above 70%. It is applied BEFORE the output chain, and above 70% it exceeds
+// unity on purpose, for the chain's compressors and limiter to bring back.
+var stockVolumeTableDb = [31]float64{-90, -33, -30, -26, -25, -23, -21, -19, -17, -16, -14,
+	-13, -12, -10, -9, -8, -7, -5, -5, -4, -4, -4, -4, -3, -3, -3, -3, -3, -2, -1, 0}
+
+var stockLevelSteps = [4][2]float64{{70, 0}, {80, 3.5}, {90, 7.5}, {100, 14.5}}
+
+const stockBaseDb = -0.8
+
+// StockVolumeDb is the gain in dB for a level under the stock-sound profile;
+// ok is false for level 0, which is silence.
+func StockVolumeDb(level int) (db float64, ok bool) {
+	if level <= 0 {
+		return 0, false
+	}
+	level = min(level, 127)
+	pct := float64(level) * 100.0 / 127
+	pos := pct * float64(len(stockVolumeTableDb)-1) / 100.0
+	i := min(int(pos), len(stockVolumeTableDb)-2)
+	frac := pos - float64(i)
+	table := stockVolumeTableDb[i] + frac*(stockVolumeTableDb[i+1]-stockVolumeTableDb[i])
+	step := stockLevelSteps[len(stockLevelSteps)-1][1]
+	for _, s := range stockLevelSteps {
+		if pct <= s[0]+1e-9 {
+			step = s[1]
+			break
+		}
+	}
+	return table + step + stockBaseDb, true
+}
+
+// StockVolumeGain is StockVolumeDb as a linear gain, 0 for level 0.
+func StockVolumeGain(level int) float64 {
+	db, ok := StockVolumeDb(level)
+	if !ok {
+		return 0
+	}
+	return math.Pow(10, db/20)
+}
