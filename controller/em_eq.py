@@ -87,6 +87,40 @@ def _hishelf_sos(fc: float, gain_db: float, fs: float) -> np.ndarray:
     return np.array([[b0/a0, b1/a0, b2/a0, 1.0, a1/a0, a2/a0]])
 
 
+# ─── Driver correction (#247) ─────────────────────────────────────────────────
+#
+# This speaker is ~18dB down at 250Hz and ~9dB up near 3kHz relative to 1kHz,
+# measured with a swept sine through the Echo's own loopback and microphone in
+# three placements (#247). Stock FireOS corrects it with a fixed curve that is
+# that response inverted (+26dB at 150Hz, -14dB at 2.8kHz); without it we
+# sound thin and edgy beside a stock Echo. These four peaks and a shelf are
+# our own design, fitted to that curve: 0.9dB RMS from 120Hz to 5kHz, looser
+# above, where the room moves the response more than any filter could (#247).
+# A property of the hardware, not a preference: it is not a user control.
+CORRECTION_PEAKS = (            # (Hz, dB, Q)
+    (175.0, 29.66, 0.281),
+    (590.5, -13.84, 0.725),
+    (2618.1, -20.00, 0.674),
+    (2094.4, 5.24, 0.561),
+)
+CORRECTION_SHELF = (9861.7, 12.0)   # (Hz, dB), S=1
+# The peaks keep boosting below 100Hz (+11 to +28dB at 30-80Hz) where stock's
+# curve falls to about 0dB and cuts a notch at 65Hz: more bass than this
+# driver can move, heard as distortion on the first trial (VVV, 2026-10-16).
+# An LR4 high-pass and the notch keep ours at or under stock below 120Hz.
+CORRECTION_HIGHPASS_HZ = 80.0
+CORRECTION_NOTCH = (65.0, -25.0, 4.0)   # (Hz, dB, Q)
+
+
+def correction_sos(fs: float) -> np.ndarray:
+    """The driver correction as a stacked SOS matrix."""
+    sections = [_peak_sos(f, g, q, fs) for f, g, q in CORRECTION_PEAKS]
+    sections.append(_hishelf_sos(*CORRECTION_SHELF, fs))
+    sections.append(_peak_sos(*CORRECTION_NOTCH, fs))
+    sections.append(em_mbc._lr4(CORRECTION_HIGHPASS_HZ, fs, "high"))
+    return np.vstack(sections)
+
+
 def _loudness_sos(fs: float) -> np.ndarray:
     """Speech-range presence boost for lower listening volumes."""
     return _peak_sos(2500, 5.0, 0.8, fs)
@@ -181,9 +215,15 @@ class StreamingEQ:
     def __init__(self, sample_rate: int, bands: list | None = None,
                  loudness: bool = False,
                  limiter: "em_limiter.Limiter | None" = None,
-                 guard: "em_mbc.BassGuard | None" = None):
+                 guard: "em_mbc.BassGuard | None" = None,
+                 driver_correction: bool = False):
         self._limiter = limiter
         self._guard = guard
+        # After the user's EQ, before the guard: taste, then the hardware's
+        # correction, then protection, which is stock's order (AFE.cfg).
+        self._corr_sos = correction_sos(sample_rate) if driver_correction else None
+        self._corr_zi = (np.zeros((self._corr_sos.shape[0], 2))
+                         if self._corr_sos is not None else None)
         self._sample_rate = int(sample_rate)   # set_bands rebuilds against it
         # Last values update() applied; None until it is first called, so the
         # first call always lands rather than matching a coincidental default.
@@ -283,11 +323,13 @@ class StreamingEQ:
 
     def process(self, pcm: bytes) -> bytes:
         if len(pcm) < 2 or (self._sos is None and self._limiter is None
-                            and self._guard is None):
+                            and self._guard is None and self._corr_sos is None):
             return pcm
         samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float64)
         if self._sos is not None:
             samples, self._zi = sosfilt(self._sos, samples, zi=self._zi)
+        if self._corr_sos is not None:
+            samples, self._corr_zi = sosfilt(self._corr_sos, samples, zi=self._corr_zi)
         if self._guard is not None:
             samples = self._guard.process(samples)
         if self._limiter is not None:

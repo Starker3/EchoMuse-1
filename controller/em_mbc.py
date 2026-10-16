@@ -49,7 +49,10 @@ not the same as removing a band. Bass reduction of 20dB in band 1 produced a
 measured 0.4dB at the output. Found by measurement, not by reading it.
 """
 
+import math
+
 import numpy as np
+from scipy.ndimage import minimum_filter1d
 from scipy.signal import butter, sosfilt, sosfreqz
 
 import em_limiter
@@ -77,8 +80,49 @@ BASS_RELEASE_MS   = 200.0
 # `bassGuardEnabled`, not this. Tune with the toggle; this is headroom.
 DEFAULT_BASS_GUARD_DB = -30.0
 
+# The three bands above the guard, for the stock-sound profile (#229): stock's
+# MBCL splits at 500Hz and 7.5kHz and gives each band a gentle 2:1 law from
+# -10dB with a -40dB floor. This is what lets stock run its top volume steps
+# into the driver correction without crushing the whole signal at the
+# limiter. Release is NOT in stock's config; 100ms is our choice, to be
+# checked against a stock Echo by ear.
+UPPER_CROSSOVERS_HZ = (500.0, 7500.0)
+UPPER_RATIO = 2.0
+UPPER_THRESHOLD_DB = -10.0
+UPPER_FLOOR_DB = -40.0
+UPPER_RELEASE_MS = 100.0
+# Stock's band 1 floors at -40dB too. The profile's +26dB correction at
+# 150-200Hz puts speech far over the bass threshold, so a -30dB floor left
+# the low band 10dB hotter than stock and the driver distorted (VVV,
+# 2026-10-16). The deeper of this and the user's guard depth applies.
+STOCK_BASS_FLOOR_DB = -40.0
+# Hold before release, stock-sound profile only. Without it the gain
+# recovers between a waveform's peaks and is cut again on the next, a
+# ripple at the signal's own frequency: 1% THD at 150-200Hz and 3.5% at
+# 60Hz through the profile at half volume, heard as distortion on VVV
+# (2026-10-16). Each is longer than half a period of the band's lowest
+# content (40Hz for the bass band, 115Hz above it).
+STOCK_BASS_HOLD_MS = 20.0
+STOCK_UPPER_HOLD_MS = 10.0
+# Instant attack, the guard's law. In the parity model this matches stock
+# within 0.4dB on speech up to 70% volume and runs 1.5-4.8dB QUIETER at
+# 80-100%, the safe side for the driver. Stock's attack is not in its config;
+# a 5ms attack was tried and matched worse. The top range is settled by ear
+# against a stock Echo, not here.
+
 _FULL_SCALE = 32768.0
 _EPS = 1e-9
+
+
+def _allpass2(fc: float, fs: int) -> np.ndarray:
+    """The second-order allpass an LR4 crossover's two halves sum to
+    (Butterworth poles, Q = 1/sqrt(2)), as one SOS row. Run on a band that
+    skips a crossover, it gives that band the same phase as the bands that
+    went through it, so the split still sums flat."""
+    w0 = 2 * math.pi * fc / fs
+    alpha = math.sin(w0) / (2 * (1 / math.sqrt(2)))
+    a0, a1, a2 = 1 + alpha, -2 * math.cos(w0), 1 - alpha
+    return np.array([[a2 / a0, a1 / a0, 1.0, 1.0, a1 / a0, a2 / a0]])
 
 
 def _lr4(fc: float, fs: int, kind: str) -> np.ndarray:
@@ -114,8 +158,12 @@ class _BandGain:
     in ways that surface as a pumping artefact rather than as an error.
     """
 
-    def __init__(self, ratio, threshold_db, release_ms, floor_db, fs):
+    def __init__(self, ratio, threshold_db, release_ms, floor_db, fs, hold_ms=0.0):
         self.ratio = max(1.0, float(ratio))
+        # The target is held at its minimum over this many trailing samples
+        # (1 = no hold); the tail carries the window across chunks.
+        self._hold = max(1, int(round(float(hold_ms) * fs / 1000.0)))
+        self._tail = np.zeros(self._hold - 1)
         self.threshold_db = float(threshold_db)
         self.floor_db = min(0.0, float(floor_db))
         self._slew = (em_limiter.RELEASE_REFERENCE_DB
@@ -130,6 +178,12 @@ class _BandGain:
         # Static curve: above the threshold, keep 1/ratio of the excess.
         over = np.maximum(level_db - self.threshold_db, 0.0)
         target_db = np.maximum(-over * (1.0 - 1.0 / self.ratio), self.floor_db)
+        if self._hold > 1:
+            buf = np.concatenate([self._tail, target_db])
+            # A trailing window: element i is the minimum of buf[i-hold+1..i].
+            held = minimum_filter1d(buf, self._hold, origin=(self._hold - 1) // 2, mode="nearest")
+            self._tail = buf[-(self._hold - 1):]
+            target_db = held[self._hold - 1:]
 
         # Instant attack, slew-limited release. Instant attack is the right
         # choice for PROTECTION: the excursion happens on the transient, so a
@@ -158,7 +212,8 @@ class BassGuard:
     def __init__(self, sample_rate: int,
                  bass_guard_db: float = DEFAULT_BASS_GUARD_DB,
                  crossover_hz: float = CROSSOVER_HZ,
-                 enabled: bool = True):
+                 enabled: bool = True,
+                 upper_bands: bool = False):
         self.sample_rate = int(sample_rate)
         # Bypassed rather than absent, so a stream can be toggled without
         # dropping the instance — see set_params.
@@ -171,9 +226,34 @@ class BassGuard:
         self._zl = np.zeros((self._lp.shape[0], 2))
         self._zh = np.zeros((self._hp.shape[0], 2))
 
+        # Fixed at construction: the extra crossovers own filter state, so
+        # turning them on mid-stream would start them cold (a phase step).
+        self.upper_bands = bool(upper_bands)
         self._bass = _BandGain(BASS_RATIO, BASS_THRESHOLD_DB,
-                               BASS_RELEASE_MS, self.bass_guard_db,
-                               self.sample_rate)
+                               BASS_RELEASE_MS, self._bass_floor_db(),
+                               self.sample_rate,
+                               STOCK_BASS_HOLD_MS if self.upper_bands else 0.0)
+        if self.upper_bands:
+            f2, f3 = UPPER_CROSSOVERS_HZ
+            self._xo = [_lr4(f2, self.sample_rate, "low"), _lr4(f2, self.sample_rate, "high"),
+                        _lr4(f3, self.sample_rate, "low"), _lr4(f3, self.sample_rate, "high")]
+            self._xz = [np.zeros((s.shape[0], 2)) for s in self._xo]
+            # The bass band skips both upper crossovers; their allpass keeps
+            # its phase with the rest (0.64dB of ripple without; 0.0000 with
+            # both allpasses, crossover_flatness of the 4-band sum).
+            self._lo_ap = np.vstack([_allpass2(f2, self.sample_rate), _allpass2(f3, self.sample_rate)])
+            self._lo_apz = np.zeros((2, 2))
+            # Likewise the 115-500Hz band skips the 7.5kHz crossover.
+            self._b2_ap = _allpass2(f3, self.sample_rate)
+            self._b2_apz = np.zeros((1, 2))
+            self._upper = [_BandGain(UPPER_RATIO, UPPER_THRESHOLD_DB, UPPER_RELEASE_MS,
+                                     UPPER_FLOOR_DB, self.sample_rate, STOCK_UPPER_HOLD_MS)
+                           for _ in range(3)]
+
+    def _bass_floor_db(self) -> float:
+        if self.upper_bands:
+            return min(self.bass_guard_db, STOCK_BASS_FLOOR_DB)
+        return self.bass_guard_db
 
     @property
     def max_reduction_db(self) -> float:
@@ -199,7 +279,7 @@ class BassGuard:
         """
         if bass_guard_db is not None:
             self.bass_guard_db = min(0.0, float(bass_guard_db))
-            self._bass.floor_db = self.bass_guard_db
+            self._bass.floor_db = self._bass_floor_db()
         if enabled is not None:
             self.enabled = bool(enabled)
 
@@ -210,6 +290,8 @@ class BassGuard:
         x = np.asarray(samples, dtype=np.float64)
         low, self._zl = sosfilt(self._lp, x, zi=self._zl)
         high, self._zh = sosfilt(self._hp, x, zi=self._zh)
+        if self.upper_bands:
+            return self._process_upper(low, high)
         if not self.enabled:
             # Bypassed, but still filtered. LR4's two halves sum MAGNITUDE-
             # flat (crossover_flatness_db measures 0.0000dB); the sum is an
@@ -222,6 +304,28 @@ class BassGuard:
             # moment someone is listening for the difference.
             return low + high
         return low * (10.0 ** (self._bass.gains_db(low) / 20.0)) + high
+
+
+    def _upper_split(self, high: np.ndarray):
+        b2, self._xz[0] = sosfilt(self._xo[0], high, zi=self._xz[0])
+        b2, self._b2_apz = sosfilt(self._b2_ap, b2, zi=self._b2_apz)
+        rest, self._xz[1] = sosfilt(self._xo[1], high, zi=self._xz[1])
+        b3, self._xz[2] = sosfilt(self._xo[2], rest, zi=self._xz[2])
+        b4, self._xz[3] = sosfilt(self._xo[3], rest, zi=self._xz[3])
+        return b2, b3, b4
+
+    def _process_upper(self, low: np.ndarray, high: np.ndarray) -> np.ndarray:
+        """Four bands: the guard's law below the crossover, the gentle law
+        on the three above. Bypassed, the bands are still split and summed,
+        for the reason the two-band path does (no step at a toggle)."""
+        bands = self._upper_split(high)
+        low, self._lo_apz = sosfilt(self._lo_ap, low, zi=self._lo_apz)
+        if not self.enabled:
+            return low + sum(bands)
+        out = low * (10.0 ** (self._bass.gains_db(low) / 20.0))
+        for b, law in zip(bands, self._upper):
+            out = out + b * (10.0 ** (law.gains_db(b) / 20.0))
+        return out
 
 
 def for_stream(sample_rate: int,
