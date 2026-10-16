@@ -172,3 +172,36 @@ def test_the_hold_is_a_trailing_minimum_across_chunks(hold_ms):
         want.append(gain)
     got = np.concatenate([band.gains_db(x[a:a + 777]) for a in range(0, x.size, 777)])
     assert np.allclose(got, want, atol=1e-9)
+
+
+def test_the_upper_bands_do_not_grit_on_a_rising_syllable():
+    """Two tones in the 115-500Hz band under a 4Hz syllable envelope, at
+    0dBFS peak. With an instant attack the gain stepped down on each new
+    peak: -39dB of energy away from the tones, heard as grit on VVV at every
+    volume (2026-10-16). The 10ms attack gives -52."""
+    t = np.arange(FS * 3) / FS
+    env = 0.5 - 0.5 * np.cos(2 * np.pi * 4 * t)
+    x = env * (np.sin(2 * np.pi * 200 * t) + np.sin(2 * np.pi * 300 * t)) * 0.5 * 32767
+    g = em_mbc.BassGuard(FS, -30.0, upper_bands=True)
+    y = np.concatenate([g.process(x[i:i + 1000]) for i in range(0, x.size, 1000)])[FS // 2:]
+    spec = np.abs(np.fft.rfft(y * np.hanning(y.size))) ** 2
+    f = np.fft.rfftfreq(y.size, 1 / FS)
+    tones = (abs(f - 200) < 25) | (abs(f - 300) < 25)
+    assert 10 * np.log10(spec[~tones].sum() / spec.sum()) < -48.0
+
+
+def test_the_attack_is_a_one_pole_on_the_held_target_across_chunks():
+    band = em_mbc._BandGain(2.0, -10.0, 100.0, -40.0, FS, hold_ms=1.0, attack_ms=2.0)
+    n = band._hold
+    a = 1 - np.exp(-1 / (2.0 * FS / 1000))
+    x = np.random.default_rng(1).normal(0, 20000, 5000)
+    level = 20 * np.log10(np.maximum(np.abs(x) / 32768, 1e-12))
+    target = np.maximum(-np.maximum(level + 10, 0) * 0.5, -40)
+    padded = np.concatenate([np.zeros(n - 1), target])
+    smooth, gain, want = 0.0, 0.0, []
+    for i in range(target.size):
+        smooth = a * padded[i:i + n].min() + (1 - a) * smooth
+        gain = min(smooth, gain + band._slew, 0.0)
+        want.append(gain)
+    got = np.concatenate([band.gains_db(x[k:k + 777]) for k in range(0, x.size, 777)])
+    assert np.allclose(got, want, atol=1e-9)

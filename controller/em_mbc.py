@@ -108,12 +108,15 @@ STOCK_BASS_FLOOR_DB = -40.0
 # (2026-10-16). Each is longer than half a period of the band's lowest
 # content (40Hz for the bass band, 115Hz above it).
 STOCK_BASS_HOLD_MS = 20.0
-STOCK_UPPER_HOLD_MS = 10.0
-# Instant attack, the guard's law. In the parity model this matches stock
-# within 0.4dB on speech up to 70% volume and runs 1.5-4.8dB QUIETER at
-# 80-100%, the safe side for the driver. Stock's attack is not in its config;
-# a 5ms attack was tried and matched worse. The top range is settled by ear
-# against a stock Echo, not here.
+STOCK_UPPER_HOLD_MS = 30.0
+# The three upper bands do not cut instantly: with an instant attack the gain
+# stepped down on every new peak of a rising syllable, which is broadband
+# grit at any volume where speech crosses -10dB (about -40dB of junk on two
+# tones, VVV 2026-10-16). Their held target is smoothed by a one-pole with
+# this time constant (-47..-57dB), and the 30ms hold covers what the slower
+# attack lets through between peaks. The bass band keeps the guard's instant
+# attack: it is protection, and was never the grit.
+STOCK_UPPER_ATTACK_MS = 10.0
 
 _FULL_SCALE = 32768.0
 _EPS = 1e-9
@@ -163,7 +166,8 @@ class _BandGain:
     in ways that surface as a pumping artefact rather than as an error.
     """
 
-    def __init__(self, ratio, threshold_db, release_ms, floor_db, fs, hold_ms=0.0):
+    def __init__(self, ratio, threshold_db, release_ms, floor_db, fs, hold_ms=0.0,
+                 attack_ms=0.0):
         self.ratio = max(1.0, float(ratio))
         # The target is held at its minimum over this many trailing samples
         # (1 = no hold); the tail carries the window across chunks.
@@ -173,6 +177,11 @@ class _BandGain:
         self.floor_db = min(0.0, float(floor_db))
         self._slew = (em_limiter.RELEASE_REFERENCE_DB
                       / (max(0.1, float(release_ms)) / 1000.0) / fs)
+        # One-pole smoothing of the held target (0 = instant attack), and
+        # its carried output.
+        self._attack = (1.0 - math.exp(-1.0 / (float(attack_ms) * fs / 1000.0))
+                        if attack_ms > 0 else 0.0)
+        self._smooth_db = 0.0
         self._gain_db = 0.0
         self.max_reduction_db = 0.0
 
@@ -190,8 +199,14 @@ class _BandGain:
             held = minimum_filter1d(buf, self._hold, origin=(self._hold - 1) // 2, mode="nearest")
             self._tail = buf[-(self._hold - 1):]
             target_db = held[self._hold - 1:]
+        if self._attack:
+            a = self._attack
+            target_db, _ = _signal().lfilter([a], [1.0, -(1.0 - a)], target_db,
+                                             zi=[(1.0 - a) * self._smooth_db])
+            self._smooth_db = float(target_db[-1])
 
-        # Instant attack, slew-limited release. Instant attack is the right
+        # Instant attack (onto the smoothed target, where there is one),
+        # slew-limited release. Instant attack is the right
         # choice for PROTECTION: the excursion happens on the transient, so a
         # compressor that takes 10ms to respond has already let it through.
         # Written as a running minimum in a sheared coordinate system rather
@@ -253,7 +268,8 @@ class BassGuard:
             self._b2_ap = _allpass2(f3, self.sample_rate)
             self._b2_apz = np.zeros((1, 2))
             self._upper = [_BandGain(UPPER_RATIO, UPPER_THRESHOLD_DB, UPPER_RELEASE_MS,
-                                     UPPER_FLOOR_DB, self.sample_rate, STOCK_UPPER_HOLD_MS)
+                                     UPPER_FLOOR_DB, self.sample_rate, STOCK_UPPER_HOLD_MS,
+                                     STOCK_UPPER_ATTACK_MS)
                            for _ in range(3)]
 
     def _bass_floor_db(self) -> float:

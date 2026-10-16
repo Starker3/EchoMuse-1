@@ -65,7 +65,11 @@ const (
 	// without it the gain recovers between a waveform's peaks and is cut
 	// again on the next, 1% THD at 150-200Hz.
 	stockBassHoldMs  = 20.0
-	stockUpperHoldMs = 10.0
+	stockUpperHoldMs = 30.0
+	// stockUpperAttackMs (em_mbc.STOCK_UPPER_ATTACK_MS): the upper bands'
+	// held target is smoothed by a one-pole; an instant attack stepped the
+	// gain on every new peak, heard as grit on VVV.
+	stockUpperAttackMs = 10.0
 )
 
 // holdMin is the minimum of the last n values pushed, by a monotonic deque:
@@ -122,6 +126,8 @@ type upperBands struct {
 	gainDb             [3]float64
 	gain               [3]gainCache
 	hold               [3]*holdMin
+	smoothDb           [3]float64 // the one-pole's output
+	attack             float64    // its coefficient
 	slew               float64
 	maxReductionDb     float64
 }
@@ -138,11 +144,12 @@ func newUpperBands(fs float64) *upperBands {
 	for i := range u.hold {
 		u.hold[i] = newHoldMin(stockUpperHoldMs, fs)
 	}
+	u.attack = 1 - math.Exp(-1/(stockUpperAttackMs*fs/1000))
 	return u
 }
 
-// bandGain is em_mbc._BandGain for one sample: the 2:1 static law with an
-// instant attack and a slew-limited release.
+// bandGain is em_mbc._BandGain for one sample: the 2:1 static law, held,
+// smoothed by the attack one-pole, then instant down and slew-limited up.
 func (u *upperBands) bandGain(i int, x float64) float64 {
 	target := 0.0
 	if a := math.Abs(x); a > upperThresholdLn {
@@ -150,7 +157,10 @@ func (u *upperBands) bandGain(i int, x float64) float64 {
 		target = max(-(levelDb-upperThresholdDb)*(1-1/upperRatio), upperFloorDb)
 	}
 	target = u.hold[i].push(target)
-	u.gainDb[i] = min(target, u.gainDb[i]+u.slew)
+	// scipy's lfilter order (b0*x + z, z = -a1*y), each product rounded on
+	// its own so no platform fuses them and the result stays bit-exact.
+	u.smoothDb[i] = float64(u.attack*target) + float64((1-u.attack)*u.smoothDb[i])
+	u.gainDb[i] = min(u.smoothDb[i], u.gainDb[i]+u.slew)
 	if r := -u.gainDb[i]; r > u.maxReductionDb {
 		u.maxReductionDb = r
 	}
@@ -183,6 +193,7 @@ func (u *upperBands) reset() {
 	}
 	u.b2AP.reset()
 	u.gainDb = [3]float64{}
+	u.smoothDb = [3]float64{}
 	for _, h := range u.hold {
 		h.reset()
 	}
