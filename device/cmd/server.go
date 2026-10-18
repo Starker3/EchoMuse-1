@@ -162,6 +162,9 @@ func main() {
 	// Local duck at the device's own wake crossing, confirmed or released by
 	// the controller's duck message (OnDuck below).
 	localDuck = speaker.NewLocalDuck(pcmSpeaker.SetDuck, speaker.LocalDuckHold)
+	if benchSpeaker != nil {
+		benchSpeaker(pcmSpeaker)
+	}
 
 	buttonController.SetVolumeCallback(func(direction string) {
 		// Inert without a controller: nothing is playing to be louder or
@@ -1369,6 +1372,10 @@ func speakerPlaying(spk *speaker.PcmSpeaker) func() bool {
 // benchScorer instruments a newly opened scorer; set only in bench builds
 // (trace_bench.go), nil in release.
 var benchScorer func(*shadow.Scorer, *speaker.PcmSpeaker)
+
+// benchSpeaker is handed the speaker at startup; set only in bench builds
+// (play_bench.go).
+var benchSpeaker func(*speaker.PcmSpeaker)
 
 // actsOnCrossings describes what a crossing will DO, for the log line. The
 // distinction is the whole difference between the two live modes and is not
