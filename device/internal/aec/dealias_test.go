@@ -73,8 +73,8 @@ func TestDealiasRemovesTheAlias(t *testing.T) {
 	if a := level(got, 4000); a > 80 {
 		t.Errorf("4kHz alias in the rebuilt reference: %.0f, want < 1%% of 8000", a)
 	}
-	if d.locks != 1 || d.pos != 4*2048+2+3*2560 {
-		t.Errorf("locks %d at %d, want 1 at the true position", d.locks, d.pos-3*2560)
+	if !d.locked || d.relocks != 0 || d.pos != 4*2048+2+3*2560 {
+		t.Errorf("locked=%v relocks=%d at %d, want one lock at the true position", d.locked, d.relocks, d.pos-3*2560)
 	}
 }
 
@@ -99,8 +99,8 @@ func TestDealiasFollowsAndRelocks(t *testing.T) {
 	if got := d.clean(ref); bytes.Equal(got, ref) || level(got, 4000) > 80 {
 		t.Fatal("not found again after a jump")
 	}
-	if d.locks != 2 {
-		t.Errorf("locks = %d, want 2", d.locks)
+	if d.relocks != 1 || d.losses != 1 {
+		t.Errorf("relocks=%d losses=%d, want 1 and 1", d.relocks, d.losses)
 	}
 }
 
@@ -122,5 +122,109 @@ func TestDealiasFallsBackToCh8(t *testing.T) {
 	var none *dealias
 	if got := none.clean(other); !bytes.Equal(got, other) {
 		t.Error("nil dealias rewrote the reference")
+	}
+}
+
+// A loopback that never matches is searched three times, then left alone
+// for dealiasBackoff batches, not searched on every one.
+func TestDealiasBacksOffWhenNothingMatches(t *testing.T) {
+	d := newDealias()
+	for k := 0; k < 12; k++ {
+		d.feed(output(2048, k*2048, twoTones))
+	}
+	rng := rand.New(rand.NewSource(2))
+	other := loopback(2560, 0, func(int) float64 { return rng.NormFloat64() * 5000 })
+	for i := 0; i < dealiasMaxMisses; i++ {
+		d.clean(other)
+	}
+	if d.skip != dealiasBackoff || d.backoffs != 1 {
+		t.Fatalf("skip=%d backoffs=%d after %d misses", d.skip, d.backoffs, dealiasMaxMisses)
+	}
+	// While backing off, even a reference that would match is passed as is.
+	ref := loopback(2560, 4*2048, twoTones)
+	if got := d.clean(ref); !bytes.Equal(got, ref) || d.skip != dealiasBackoff-1 {
+		t.Fatalf("searched during the back-off (skip=%d)", d.skip)
+	}
+}
+
+// Following a lock allocates nothing: it runs on the mic goroutine, which
+// has a deadline.
+func TestDealiasFollowingDoesNotAllocate(t *testing.T) {
+	d := newDealias()
+	for k := 0; k < 30; k++ {
+		d.feed(output(2048, k*2048, twoTones))
+	}
+	p := 2048
+	d.clean(loopback(2560, p, twoTones))
+	refs := make([][]byte, 5)
+	for i := range refs {
+		p += 3 * 2560
+		refs[i] = loopback(2560, p, twoTones)
+	}
+	i := 0
+	allocs := testing.AllocsPerRun(len(refs)-1, func() {
+		d.clean(refs[i])
+		i++
+	})
+	if allocs != 0 || !d.locked {
+		t.Errorf("%.0f allocations per period (locked=%v)", allocs, d.locked)
+	}
+}
+
+// End to end through the Canceller, as the device runs it: WriteFar is fed
+// every period (and must feed the ring even on the hardware path, where it
+// returns early), the mic hears a filtered echo, and ch8 is the aliased
+// copy. White noise puts two thirds of its energy above 8kHz.
+func TestCancellerUsesTheDealiasedReference(t *testing.T) {
+	att := func(dealiased bool) float64 {
+		c := hwCanceller(64)
+		if !dealiased {
+			c.dealias = nil
+		}
+		rng := rand.New(rand.NewSource(3))
+		const periods = 140 // 6s
+		out := make([]float64, periods*2048)
+		for i := range out {
+			out[i] = rng.NormFloat64() * 4000
+		}
+		f := func(i int) float64 {
+			if i < 0 || i >= len(out) {
+				return 0
+			}
+			return out[i]
+		}
+		echo := newDealias() // its filter, as the codec's for the mics
+		const ahead = 4      // periods written before they play
+		for k := 0; k < ahead; k++ {
+			c.WriteFar(output(2048, k*2048, f))
+		}
+		var in, res float64
+		played := 0
+		for k := ahead; k < periods; k++ {
+			c.WriteFar(output(2048, k*2048, f))
+			for played+3*2560+3*dealiasTaps < (k-ahead+1)*2048 {
+				ref := loopback(2560, played, f)
+				mic := make([]byte, 2560*2)
+				for i := 0; i < 2560; i++ {
+					acc := 0.0
+					for j, h := range echo.fir {
+						acc += h * f(played+3*(i-20)-dealiasHalf+j)
+					}
+					binary.LittleEndian.PutUint16(mic[i*2:], uint16(int16(-0.5*acc)))
+				}
+				got := c.ProcessWithRef(mic, ref)
+				if played > 3*16000*3 { // after 3s
+					in += rms(mic)
+					res += rms(got)
+				}
+				played += 3 * 2560
+			}
+		}
+		return 20 * math.Log10(in/res)
+	}
+	with, without := att(true), att(false)
+	t.Logf("cancellation: %.1fdB de-aliased, %.1fdB on ch8 as captured", with, without)
+	if with < 20 || without > 10 {
+		t.Errorf("de-aliased %.1fdB (want > 20), as captured %.1fdB (want < 10)", with, without)
 	}
 }
