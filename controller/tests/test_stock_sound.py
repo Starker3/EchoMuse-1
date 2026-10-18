@@ -205,3 +205,22 @@ def test_the_attack_is_a_one_pole_on_the_held_target_across_chunks():
         want.append(gain)
     got = np.concatenate([band.gains_db(x[k:k + 777]) for k in range(0, x.size, 777)])
     assert np.allclose(got, want, atol=1e-9)
+
+
+def test_the_voice_filter_adds_body_and_softens_presence():
+    """Voice gets stock's warmth on top of the shared curve: +3dB around
+    230Hz, less at 2.1kHz, and nothing much at 1kHz."""
+    r = _response_db(em_eq.voice_sos(FS), [228, 1000, 2105])
+    assert r[0] == pytest.approx(3.0, abs=0.2)
+    assert abs(r[1]) < 1.0
+    assert r[2] < -2.0
+    for row in em_eq.voice_sos(FS):
+        assert np.all(np.abs(np.roots([1.0, row[4], row[5]])) < 1.0)
+
+
+def test_the_bass_band_is_held_harder_than_the_upper_two():
+    """This driver's 2nd harmonic at 150-300Hz rises with level, so the
+    115-500Hz band compresses earlier and harder than stock's 2:1 from -10."""
+    (r2, t2, _), (r3, t3, _), (r4, t4, _) = em_mbc.UPPER_LAWS
+    assert r2 > r3 and r2 > r4
+    assert t2 < t3 and t2 < t4

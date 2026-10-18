@@ -92,8 +92,16 @@ DEFAULT_BASS_GUARD_DB = -30.0
 # limiter. Release is NOT in stock's config; 100ms is our choice, to be
 # checked against a stock Echo by ear.
 UPPER_CROSSOVERS_HZ = (500.0, 7500.0)
-UPPER_RATIO = 2.0
-UPPER_THRESHOLD_DB = -10.0
+# (ratio, threshold dBFS, attack ms) per band: 115-500Hz, 500Hz-7.5kHz,
+# above. The
+# first is harder than stock's 2:1 from -10: this driver's 2nd harmonic at
+# 150-300Hz rises with level (250Hz: 7.5% at -18dBFS, 37% at -3, VVV
+# 2026-10-18), and at 85-100% volume 2:1 from -10 left the limiter doing the
+# work, heard as pumping and some distortion. 3:1 from -16 was picked by ear
+# over that and over 4:1 from -20 (thinner) on voice and music. Its attack
+# is 20ms: at 10ms the harder law put -48dB of junk on the rising-syllable
+# test, 20ms gives -53 (as 2:1 did) for 1dB more peak into the limiter.
+UPPER_LAWS = ((3.0, -16.0, 20.0), (2.0, -10.0, 10.0), (2.0, -10.0, 10.0))
 UPPER_FLOOR_DB = -40.0
 UPPER_RELEASE_MS = 100.0
 # Stock's band 1 floors at -40dB too. The profile's +26dB correction at
@@ -113,10 +121,9 @@ STOCK_UPPER_HOLD_MS = 30.0
 # stepped down on every new peak of a rising syllable, which is broadband
 # grit at any volume where speech crosses -10dB (about -40dB of junk on two
 # tones, VVV 2026-10-16). Their held target is smoothed by a one-pole with
-# this time constant (-47..-57dB), and the 30ms hold covers what the slower
+# the attack in UPPER_LAWS (-47..-57dB), and the 30ms hold covers what the slower
 # attack lets through between peaks. The bass band keeps the guard's instant
 # attack: it is protection, and was never the grit.
-STOCK_UPPER_ATTACK_MS = 10.0
 
 _FULL_SCALE = 32768.0
 _EPS = 1e-9
@@ -267,10 +274,10 @@ class BassGuard:
             # Likewise the 115-500Hz band skips the 7.5kHz crossover.
             self._b2_ap = _allpass2(f3, self.sample_rate)
             self._b2_apz = np.zeros((1, 2))
-            self._upper = [_BandGain(UPPER_RATIO, UPPER_THRESHOLD_DB, UPPER_RELEASE_MS,
+            self._upper = [_BandGain(ratio, threshold, UPPER_RELEASE_MS,
                                      UPPER_FLOOR_DB, self.sample_rate, STOCK_UPPER_HOLD_MS,
-                                     STOCK_UPPER_ATTACK_MS)
-                           for _ in range(3)]
+                                     attack)
+                           for ratio, threshold, attack in UPPER_LAWS]
 
     def _bass_floor_db(self) -> float:
         if self.upper_bands:

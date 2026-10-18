@@ -103,27 +103,46 @@ def _hishelf_sos(fc: float, gain_db: float, fs: float) -> np.ndarray:
 
 # ─── Driver correction (#247) ─────────────────────────────────────────────────
 #
-# This speaker is ~18dB down at 250Hz and ~9dB up near 3kHz relative to 1kHz,
-# measured with a swept sine through the Echo's own loopback and microphone in
-# three placements (#247). Stock FireOS corrects it with a fixed curve that is
-# that response inverted (+26dB at 150Hz, -14dB at 2.8kHz); without it we
-# sound thin and edgy beside a stock Echo. These four peaks and a shelf are
-# our own design, fitted to that curve: 0.9dB RMS from 120Hz to 5kHz, looser
-# above, where the room moves the response more than any filter could (#247).
+# This speaker is ~18dB down at 250Hz and ~9dB up near 3kHz relative to 1kHz
+# (#247), confirmed with an external mic 30cm away (Yeti Nano, VVV,
+# 2026-10-18: -17dB at 250Hz, -25 at 175, +8-9 at 2.3-4.5kHz, a -14dB hole
+# at 8-9kHz). The curve is a VOICING chosen by ear from that measurement,
+# not the response inverted: loudness-matched A/B on two voices and three
+# songs, the inverse ("flat") sounded thin, stock's curve warm but dull at
+# 2-2.5kHz; this is halfway between the two, which Wil picked for music.
+# Voice gets stock's warmth back through voice_sos(). Four peaks and a shelf,
+# within 0.6dB RMS of the curve that was heard, 120Hz-12kHz.
 # A property of the hardware, not a preference: it is not a user control.
 CORRECTION_PEAKS = (            # (Hz, dB, Q)
-    (175.0, 29.66, 0.281),
-    (590.5, -13.84, 0.725),
-    (2618.1, -20.00, 0.674),
-    (2094.4, 5.24, 0.561),
+    (174.9, 26.13, 0.388),
+    (3277.5, -10.94, 0.753),
+    (576.3, -10.93, 0.735),
+    (8707.8, 5.52, 2.985),
 )
-CORRECTION_SHELF = (9861.7, 12.0)   # (Hz, dB), S=1
+CORRECTION_SHELF = (11874.4, 12.0)   # (Hz, dB), S=1
 # The peaks keep boosting below 100Hz (+11 to +28dB at 30-80Hz) where stock's
 # curve falls to about 0dB and cuts a notch at 65Hz: more bass than this
 # driver can move, heard as distortion on the first trial (VVV, 2026-10-16).
 # An LR4 high-pass and the notch keep ours at or under stock below 120Hz.
 CORRECTION_HIGHPASS_HZ = 80.0
 CORRECTION_NOTCH = (65.0, -25.0, 4.0)   # (Hz, dB, Q)
+
+
+# The voice plane's own filter, stock-sound profile only: +3dB of body at
+# 230Hz and less 2.1kHz and 8.6kHz than the music gets, which puts speech
+# within 1.1dB (1/3-octave) of stock's curve. Picked by ear over the shared
+# curve on both a male and a female voice at 50 and 70% (VVV, 2026-10-18).
+# Applied to the voice before the mix, in float, since it boosts.
+VOICE_PEAKS = (                 # (Hz, dB, Q)
+    (228.0, 3.0, 0.76),
+    (2105.5, -2.8, 1.25),
+    (8583.1, -5.17, 5.0),
+)
+
+
+def voice_sos(fs: float) -> np.ndarray:
+    """The voice plane's filter as a stacked SOS matrix."""
+    return np.vstack([_peak_sos(f, g, q, fs) for f, g, q in VOICE_PEAKS])
 
 
 def correction_sos(fs: float) -> np.ndarray:

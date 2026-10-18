@@ -167,6 +167,8 @@ type PcmSpeaker struct {
 	volLevel  atomic.Int64
 	stock     atomic.Bool
 	stockWide []float64
+	// voiceFilter: the stock-sound profile's voice plane (stockPeriod).
+	voiceFilter *outchain.VoiceFilter
 	// response is a relative gain on the voice plane before it is mixed with
 	// music. The device volume still runs on the completed mix below, so the
 	// buttons remain authoritative; response caps itself against vol so their
@@ -279,6 +281,7 @@ func NewPcmSpeaker(echoTap func([]byte), levelTap func(rms float64)) (*PcmSpeake
 		srcBuf:        make([]byte, periodBytes),
 		responseMix:   make([]float64, periodSize*2),
 		stockWide:     make([]float64, periodSize*2),
+		voiceFilter:   outchain.NewVoiceFilter(48000),
 		responseGains: make([]float64, periodSize),
 	}
 	s.voice = newAudioStream(audioChanDepth, s.deadCh)
@@ -610,9 +613,9 @@ func (p *PcmSpeaker) silenceLoop() {
 			if hasResponse {
 				tgt = response.volumeTarget
 			}
-			out = p.stockPeriod(voice, music, wideResponse, responseGains, tgt)
+			out = p.stockPeriod(voice, music, responseGains, tgt)
 		} else if wideResponse {
-			wide := p.mixer.MixResponse(p.responseMix, voice, music, p.duckTarget.Load(), responseGains)
+			wide := p.mixer.MixResponse(p.responseMix, voice, music, p.duckTarget.Load(), responseGains, nil)
 			if applied := p.chain.ProcessFloat(wide, responseGains); applied != nil {
 				log.Printf("[speaker] output chain: %s", applied)
 			}
@@ -670,12 +673,15 @@ func (p *PcmSpeaker) silenceLoop() {
 // stockPeriod builds one period under the stock-sound profile, in stock
 // FireOS's order: the mix in float, then the volume, then the chain at the
 // TRUE level (ProcessWide), which may be over full scale above 70% for the
-// compressors and limiter to bring back. Returns the S16 period to write.
-func (p *PcmSpeaker) stockPeriod(voice, music []byte, wideResponse bool, responseGains []float64, volumeTarget float64) []byte {
+// compressors and limiter to bring back. The voice takes its own filter on
+// the way into the mix (outchain.VoiceFilter), so any period with voice
+// mixes in float. Returns the S16 period to write.
+func (p *PcmSpeaker) stockPeriod(voice, music []byte, responseGains []float64, volumeTarget float64) []byte {
 	wide := p.stockWide
-	if wideResponse {
-		wide = p.mixer.MixResponse(p.responseMix, voice, music, p.duckTarget.Load(), responseGains)
+	if voice != nil {
+		wide = p.mixer.MixResponse(p.responseMix, voice, music, p.duckTarget.Load(), responseGains, p.voiceFilter)
 	} else {
+		p.voiceFilter.Reset()
 		mixed := p.mixer.Mix(voice, music, p.duckTarget.Load())
 		if mixed == nil {
 			if p.chain.Idle() {

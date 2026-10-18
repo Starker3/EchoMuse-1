@@ -185,6 +185,20 @@ def main():
     with open(os.path.join(HERE, "vectors.json"), "w") as f:
         json.dump(manifest, f, indent=1)
         f.write("\n")
+    voice_filter()
+
+
+def voice_filter():
+    """The voice plane's filter (em_eq.voice_sos) on speech-like input, in
+    float: it runs before the mix, so it has no S16 output of its own."""
+    from scipy.signal import sosfilt
+    x = _signal("speechlike", 4, 12)
+    y = sosfilt(em_eq.voice_sos(FS), x.astype(np.float64))
+    for name, data in (("voice_filter.in.s16.gz", x.astype("<i2")),
+                       ("voice_filter.out.f64.gz", y.astype("<f8"))):
+        with open(os.path.join(HERE, name), "wb") as f, gzip.GzipFile(fileobj=f, mode="wb",
+                                                                    mtime=0) as gz:
+            gz.write(data.tobytes())
 
 
 if __name__ == "__main__":
