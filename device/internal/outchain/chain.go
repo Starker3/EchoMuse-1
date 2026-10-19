@@ -297,7 +297,7 @@ func (c *Chain) ProcessFloat(buf []float64, fullScales []float64) (applied *Para
 // ProcessWide runs the chain over a stereo period at its TRUE level, which
 // may exceed full scale, and writes S16 to out. It is the stock-sound
 // profile's entry point: the volume is applied BEFORE the chain there, as on
-// stock, and above 70% it puts the signal over full scale on purpose for the
+// stock, and near the top it puts the signal over full scale on purpose for the
 // compressors and limiter to bring back. Only the chain's output is clipped.
 // len(out) must be 2*len(in) bytes (stereo S16 for stereo float).
 func (c *Chain) ProcessWide(in []float64, out []byte) (applied *Params) {

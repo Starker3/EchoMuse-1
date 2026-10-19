@@ -109,19 +109,25 @@ def test_upper_bands_are_off_by_default():
 
 def test_the_stock_volume_law():
     assert em_volume.stock_level_db(0) is None
-    assert em_volume.stock_level_db(em_volume.DEVICE_VOLUME_MAX) == pytest.approx(13.7)
+    assert em_volume.stock_level_db(em_volume.DEVICE_VOLUME_MAX) == em_volume.STOCK_CEILING_DB
     levels = [em_volume.stock_level_db(lv) for lv in range(1, em_volume.DEVICE_VOLUME_MAX + 1)]
-    assert all(b >= a for a, b in zip(levels, levels[1:])), "louder never comes from turning down"
-    # Half volume: stock's step 15 of 30 is -8dB, minus the 0.8dB base.
-    assert em_volume.STOCK_VOLUME_TABLE_DB[15] == -8
-    assert em_volume.stock_level_db(round(em_volume.DEVICE_VOLUME_MAX / 2)) == pytest.approx(-8.8, abs=0.3)
+    assert all(b > a for a, b in zip(levels, levels[1:])), "every level up is louder"
 
 
-def test_the_stock_law_is_louder_than_the_old_one_below_full():
-    """The point of the profile: at the same setting, stock is 14-30dB
-    louder through the middle of the range than our old 0.5dB-per-level law."""
-    for lv in (13, 38, 64, 89, 114):
-        assert em_volume.stock_level_db(lv) - em_volume.level_to_db(lv) > 9.0
+def test_every_button_press_is_four_db():
+    """The physical buttons step 8 levels from 47 to 127 (internal/server
+    volume.go). Under stock's table those presses were +2.9, +1.9, +2.7,
+    +1.1, +0.3, +3.5 and then nothing: the complaint that started this."""
+    presses = range(47, em_volume.DEVICE_VOLUME_MAX + 1, 8)
+    steps = [em_volume.stock_level_db(b) - em_volume.stock_level_db(a)
+             for a, b in zip(presses, presses[1:])]
+    assert len(steps) == 10
+    assert all(s == pytest.approx(4.0) for s in steps)
+
+
+def test_the_stock_law_is_the_plain_law_lifted():
+    for lv in (1, 13, 47, 64, 89, 114, 127):
+        assert em_volume.stock_level_db(lv) - em_volume.level_to_db(lv) == em_volume.STOCK_CEILING_DB
 
 
 # Stock's correction, absolute, read off its FIR (#247 provenance): it falls

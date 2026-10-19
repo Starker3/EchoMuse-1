@@ -162,7 +162,7 @@ type PcmSpeaker struct {
 	cue cueState
 	// volLevel is the last level SetVolume was given, and stock says which
 	// law turns it into vol's gain: the stock-sound profile's (applied BEFORE
-	// the chain, exceeding unity above 70%) while it is in force, else the
+	// the chain, exceeding unity from level 107) while it is in force, else the
 	// 0.5dB-per-level one. See refreshStock.
 	volLevel  atomic.Int64
 	stock     atomic.Bool
@@ -672,7 +672,7 @@ func (p *PcmSpeaker) silenceLoop() {
 
 // stockPeriod builds one period under the stock-sound profile, in stock
 // FireOS's order: the mix in float, then the volume, then the chain at the
-// TRUE level (ProcessWide), which may be over full scale above 70% for the
+// TRUE level (ProcessWide), which may be over full scale from level 107 for the
 // compressors and limiter to bring back. The voice takes its own filter on
 // the way into the mix (outchain.VoiceFilter), so any period with voice
 // mixes in float. Returns the S16 period to write.
@@ -938,16 +938,10 @@ func (p *PcmSpeaker) SetVolume(level int) {
 	p.applyVolumeLaw()
 }
 
-// stockLevelCap is where the stock-sound law stops for now: 70% (level 89).
-// Above it stock drives this driver into its compressors (+3.5 to +14.5dB),
-// and ours match stock's only in a model whose compressor timings are a
-// guess (#229). Raised once a stock Echo and ours have been compared by ear.
-const stockLevelCap = 89
-
 func (p *PcmSpeaker) applyVolumeLaw() {
 	level := int(p.volLevel.Load())
 	if p.stock.Load() {
-		p.vol.set(StockVolumeGain(min(level, stockLevelCap)))
+		p.vol.set(StockVolumeGain(level))
 	} else {
 		p.vol.set(VolumeGain(level))
 	}

@@ -51,8 +51,8 @@ func cappedResponseGain(requested, volume float64) float64 {
 	if volume <= 0 {
 		return requested
 	}
-	// Never below 1: under the stock-sound law the volume exceeds unity above
-	// 70%, and the boost must then stop adding, not start cutting the voice.
+	// Never below 1: under the stock-sound law the volume exceeds unity from
+	// level 107, and the boost must then stop adding, not start cutting the voice.
 	ceiling := max(1/volume, 1)
 	if requested > ceiling {
 		return ceiling
