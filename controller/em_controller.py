@@ -6153,6 +6153,7 @@ async def main():
         await azc.async_unregister_service(info)
         await azc.async_close()
         await runner.cleanup()
+        await em_shutdown.close_database()
         log.info("EchoMuse Controller stopped")
 
 

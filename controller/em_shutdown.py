@@ -16,6 +16,9 @@ import os
 import signal
 import threading
 
+import em_db
+import em_dbwriter
+
 SIGNALS = (signal.SIGTERM, signal.SIGINT)
 
 # Under docker's and Supervisor's 10 second grace period, with room to exit.
@@ -53,3 +56,15 @@ def backstop(log, budget_s: float = BUDGET_S, _exit=os._exit) -> threading.Timer
     timer.daemon = True
     timer.start()
     return timer
+
+
+async def close_database() -> None:
+    """Drain the writer, drop later writes, then close the database.
+
+    Last in shutdown, so a turn or log line written during teardown still
+    lands (#968, @Dutch365). Off the loop: both block.
+    """
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, em_dbwriter.drain)
+    em_dbwriter.seal()
+    await loop.run_in_executor(None, em_db.close)

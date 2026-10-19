@@ -69,3 +69,64 @@ def test_a_cancelled_backstop_does_not_exit():
     timer.join(1)
     assert codes == []
     assert timer.daemon
+
+
+# The database closes last, after the writer has finished (#968, @Dutch365).
+
+@pytest.fixture
+def writer():
+    import em_dbwriter
+    yield em_dbwriter
+    em_dbwriter.unseal()
+
+
+def test_drain_waits_for_writes_already_queued(writer):
+    done = []
+    gate = threading.Event()
+    writer.submit(lambda: (gate.wait(1), done.append(1)))
+    threading.Timer(0.1, gate.set).start()
+    assert writer.drain(timeout=2)
+    assert done == [1]
+
+
+def test_drain_gives_up_on_a_stuck_writer(writer):
+    gate = threading.Event()
+    writer.submit(gate.wait, 2)
+    try:
+        assert not writer.drain(timeout=0.1)
+    finally:
+        gate.set()
+        writer.drain(timeout=2)
+
+
+def test_a_sealed_writer_drops_later_writes(writer, caplog):
+    ran = []
+    writer.seal()
+    with caplog.at_level(logging.WARNING, logger="echomuse.dbwriter"):
+        writer.submit(ran.append, 1)
+        writer.submit(ran.append, 2)
+    assert writer.drain(timeout=2)
+    assert ran == []
+    assert sum("dropping" in r.message for r in caplog.records) == 1
+
+
+def test_close_checkpoints_and_can_be_called_twice(tmp_path):
+    import em_db as db
+    path = tmp_path / "t.db"
+    db.init(str(path))
+    db.close()
+    db.close()
+    # TRUNCATE leaves an empty WAL, so nothing is waiting to be replayed.
+    wal = tmp_path / "t.db-wal"
+    assert not wal.exists() or wal.stat().st_size == 0
+
+
+def test_the_database_closes_after_the_writer_drains(monkeypatch):
+    import em_db
+    import em_dbwriter
+    calls = []
+    monkeypatch.setattr(em_dbwriter, "drain", lambda: calls.append("drain"))
+    monkeypatch.setattr(em_dbwriter, "seal", lambda: calls.append("seal"))
+    monkeypatch.setattr(em_db, "close", lambda: calls.append("close"))
+    asyncio.run(em_shutdown.close_database())
+    assert calls == ["drain", "seal", "close"]
