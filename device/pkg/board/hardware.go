@@ -31,9 +31,10 @@ type Hardware struct {
 	// /proc/asound/pcm lists.
 	Capture  PCM
 	Playback PCM
-	// LightSensor is the ambient light sensor. A zero value means the board
-	// has none.
-	LightSensor LightSensor
+	// LightSensors are the ambient light sensors the board may carry, in the
+	// order to try them; empty means the board has none. More than one when
+	// the part is second-sourced (#90).
+	LightSensors []LightSensor
 	// HCI is the Bluetooth controller's raw HCI character device, "" when
 	// the board has none the firmware can drive. A node of the same name
 	// can exist on a board whose radio is not behind it, so this is stated
@@ -41,11 +42,18 @@ type Hardware struct {
 	HCI string
 }
 
-// LightSensor is an ambient light sensor on the i2c bus.
+// LightSensor is an ambient light sensor, found by its sysfs `name` on a bus.
 type LightSensor struct {
-	Driver string // the client's sysfs `name`
-	Attr   string // the attribute, in the client's directory, that reads lux
+	Driver string // the device's sysfs `name`
+	Attr   string // the attribute, in the device's directory, that reads lux
+	Bus    string // BusI2C or BusIIO
 }
+
+// Buses a light sensor is enumerated on.
+const (
+	BusI2C = "i2c" // /sys/bus/i2c/devices
+	BusIIO = "iio" // /sys/bus/iio/devices
+)
 
 // Input is an evdev device.
 type Input struct {
@@ -77,7 +85,12 @@ var biscuitHardware = &Hardware{
 	MuteLEDGPIO: "444",
 	Capture:     PCM{Name: "TLV320AIC3101 Capture", Fallback: &PCMAddr{0, 24}},
 	Playback:    PCM{Name: "TLV320AIC3204 Playback", Fallback: &PCMAddr{0, 23}},
-	LightSensor: LightSensor{Driver: "tsl2540", Attr: "als_lux"},
+	// Which one is fitted differs by batch (#90). Never the 2584's
+	// calibrated_lux: reading it corrupts kernel memory.
+	LightSensors: []LightSensor{
+		{Driver: "tsl2540", Attr: "als_lux", Bus: BusI2C},
+		{Driver: "tsl2584tsv", Attr: "illuminance0_input", Bus: BusIIO},
+	},
 	// MediaTek's combo-chip (WMT) Bluetooth node.
 	HCI: "/dev/stpbt",
 }
@@ -97,12 +110,12 @@ type Layout struct {
 	MuteLEDGPIO string
 	Capture     *PCMAddr // nil when not found
 	Playback    *PCMAddr
-	// LightSensor and HCI are the board's own statements, not resolved here:
+	// LightSensors and HCI are the board's own statements, not resolved here:
 	// the sensor is looked for by internal/bindings/als, which retries, and
 	// the HCI device is opened by internal/bluetooth only when the proxy is
 	// switched on.
-	LightSensor LightSensor
-	HCI         string
+	LightSensors []LightSensor
+	HCI          string
 
 	// Notes has one line per part saying how it was found, for the log.
 	Notes []string
@@ -118,7 +131,7 @@ func Resolve(root string, b *Board) *Layout {
 	if b != nil && b.Hardware != nil {
 		hw = b.Hardware
 	}
-	l := &Layout{Board: b, MuteLEDGPIO: hw.MuteLEDGPIO, LightSensor: hw.LightSensor, HCI: hw.HCI}
+	l := &Layout{Board: b, MuteLEDGPIO: hw.MuteLEDGPIO, LightSensors: hw.LightSensors, HCI: hw.HCI}
 	note := func(part, want, got string, err error) {
 		var line string
 		switch {
