@@ -1908,6 +1908,8 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                     # precedence is a SECOND rule that can disagree with the
                     # first, and would need a way to revoke a claim a
                     # neighbour has already started a turn on.
+                    if in_playback:  # before the claim, as in _private_barge
+                        await device.send_control({"type": "speaker_flush"})
                     serves = esphome.can_serve_turn(device.device_id)
                     won_by = device.device_id
                     if serves and device.wake_arb_ms > 0 and len(em_state.devices) > 1:
@@ -1972,7 +1974,6 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                         device.last_wake = None
                     device.cancel_event.set()
                     if in_playback:
-                        await device.send_control({"type": "speaker_flush"})
                         # HA's run is normally over by now (RUN_END follows
                         # TTS_END, and we only reach playback at TTS_END), but
                         # a barge in the first milliseconds of audio can beat
@@ -1988,9 +1989,8 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                         # (pipeline_refused, 5 of 5 attempts, 2026-08-17).
                         esphome.cancel_voice_turn(
                             device.device_id, abort_ha=True, reason="barged")
-                    # Wake sound for a barge that won, after the flush so it
-                    # is not heard over the reply it interrupts. A private
-                    # Echo plays its own on the barge session's listen_ack.
+                    # Wake sound for a barge that won, after the flush; a
+                    # private Echo plays its own on the session's listen_ack.
                     if not device.barge_ceded and getattr(device, "wake_sound", False) \
                             and device.wake_cue_capable:
                         await device.play_cue("wake")
@@ -3439,6 +3439,9 @@ async def _private_barge(device: Device, ev: dict) -> None:
     em_dbwriter.submit(db.log_device, device.device_id, "info", "device",
                   f"Barge-in during {phase} (score={score:.3f})")
     device.barge_detected = True
+    if in_playback:
+        # Before the claim, whose hold would put reply audio in the session.
+        await device.send_control({"type": "speaker_flush"})
     serves = esphome.can_serve_turn(device.device_id)
     won_by = device.device_id
     if serves and device.wake_arb_ms > 0 and len(em_state.devices) > 1:
@@ -3483,7 +3486,6 @@ async def _private_barge(device: Device, ev: dict) -> None:
         device.last_wake = None
     device.cancel_event.set()
     if in_playback:
-        await device.send_control({"type": "speaker_flush"})
         esphome.abort_ha_run(device.device_id)
     else:
         esphome.cancel_voice_turn(device.device_id, abort_ha=True, reason="barged")
