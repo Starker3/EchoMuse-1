@@ -137,3 +137,13 @@ func StockVolumeGain(level int) float64 {
 	}
 	return math.Pow(10, db/20)
 }
+
+// CueVolumeGain is the volume tone's gain for a level under the law in force,
+// so the tone tracks what the music does. The cue is mixed after the chain,
+// so VolumeCue caps it at unity: above level 107 the tone stops rising.
+func CueVolumeGain(level int, stock bool) float64 {
+	if stock {
+		return StockVolumeGain(level)
+	}
+	return VolumeGain(level)
+}

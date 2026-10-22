@@ -947,6 +947,9 @@ func (p *PcmSpeaker) applyVolumeLaw() {
 	}
 }
 
+// StockLaw reports whether the stock-sound volume law is in force.
+func (p *PcmSpeaker) StockLaw() bool { return p.stock.Load() }
+
 // refreshStock decides whether the stock-sound law and order are in force:
 // the chain runs on this device, its params ask for the profile, and no plug
 // is in the jack (chainForJack). Behind a controller that processes the

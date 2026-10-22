@@ -33,8 +33,8 @@ func DefaultParams() Params {
 		LimiterEnabled:     true,
 		LimiterThresholdDb: -1,
 		LimiterReleaseMs:   150,
-		// On by default while it is trialled on the dev Echoes (#229). It
-		// has no config key yet, so the controller cannot turn it off.
+		// Always on for the speaker (#229); there is no key to turn it
+		// off. chainForJack clears it while a plug is in.
 		StockSound: true,
 	}
 }
@@ -144,7 +144,9 @@ func (c *Chain) SetParams(p Params) {
 func (c *Chain) apply(p Params) {
 	c.params = p
 	c.eq.set(p.Bands, p.Loudness)
-	c.guard.enabled = p.GuardEnabled
+	// The voicing was tuned with the guard on, and drives the chain past
+	// full scale near the top, so the profile does not let it be turned off.
+	c.guard.enabled = p.GuardEnabled || p.StockSound
 	c.guard.floorDb = math.Min(p.GuardDb, 0)
 	if p.StockSound {
 		c.guard.floorDb = math.Min(c.guard.floorDb, stockBassFloorDb)

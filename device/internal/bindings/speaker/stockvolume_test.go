@@ -56,3 +56,16 @@ func TestResponseCapNeverCuts(t *testing.T) {
 		t.Errorf("volume 0.5, requested 4: got %v, want 2", got)
 	}
 }
+
+// The volume tone follows the law the music is under, so a press previews
+// the level the music will play at.
+func TestCueFollowsTheLawInForce(t *testing.T) {
+	for _, level := range []int{1, 47, 89, 127} {
+		if got, want := CueVolumeGain(level, true), StockVolumeGain(level); got != want {
+			t.Errorf("stock, level %d: %v, want %v", level, got, want)
+		}
+		if got, want := CueVolumeGain(level, false), VolumeGain(level); got != want {
+			t.Errorf("plain, level %d: %v, want %v", level, got, want)
+		}
+	}
+}

@@ -2459,6 +2459,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 volumeCueCapable={!device.connected || !!device.volumeCueCapable}
                 remoteVolumeArcCapable={!device.connected || !!device.remoteVolumeArcCapable}
                 responseLevelCapable={!device.connected || !!device.responseLevelCapable}
+                stockSoundCapable={device.connected && !!device.stockSoundCapable}
                 wakeMicCapable={!device.connected || !!device.wakeMicCapable}
                 sendspinCapable={!device.connected || !!device.sendspinCapable}
                 sendspinPanel={device.connected && device.sendspinCapable
@@ -9735,6 +9736,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                             volumeCueCapable = true,
                             remoteVolumeArcCapable = true,
                             responseLevelCapable = true,
+                            stockSoundCapable = false,
                             wakeMicCapable = true,
                             sendspinCapable = true, sendspinPanel = null,
                             bleConnectCapable = true, blePanel = null }) {
@@ -9884,36 +9886,22 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
     { value: 'pride',      label: 'Pride',      swatches: ['#bf0000', '#bf7700', '#a9bf00', '#00bf2c', '#0055bf', '#8b00bf'] },
     { value: 'custom',     label: 'Custom',     swatches: null },
   ];
-  // Measured, not chosen (2026-08-29). The driver was swept in three
-  // placements against the hardware echo reference, and the result agrees with
-  // stock's own FIR to 0.1dB at 315Hz and 0.0dB at 630Hz — two methods sharing
-  // no assumptions (#247). Relative to 1kHz the driver is ~18dB down at 250Hz
-  // and peaks ~+8.9dB at 3150Hz.
+  // Relative to the device's own voicing (#229). Firmware with the stock-sound
+  // profile corrects the driver itself, so Flat is the voicing picked by ear
+  // (the C/E midpoint, 2026-10-18) and these faders only lean it one way. The
+  // old Speech/Music presets were partial driver corrections and would stack
+  // on it; v32 resets them to Flat.
   //
-  // The old presets predate that measurement and one of them was backwards:
-  // 'Clarity' put +7dB on band 5 (3500Hz), which is exactly where the driver
-  // already peaks, landing around +16dB at 3150 — sibilance, not clarity.
-  // 'Warmth' had the right shape and a fraction of the size.
-  //
+  // Warm and Clear are the two voicings either side of Flat, C and E, fitted
+  // to these bands relative to it (within 1dB RMS, 3dB worst, 120Hz-8kHz).
   // Bands are [125 shelf, 250, 500, 1000, 2000, 3500, 5500, 8000 shelf].
-  // 125 stays 0 in every preset: it is a SHELF, so lifting it pushes
-  // everything below into the bass guard, which then removes it — the boost
-  // belongs at 250 where the band is a peaking filter. 5500 and 8000 stay 0
-  // on evidence rather than omission: those bands moved up to 13.8dB between
-  // placements, which is more than the whole ±12dB range, so anything set
-  // there tunes one room.
+  // 125 stays 0: it is a shelf, so a lift there goes straight into the bass
+  // guard, which removes it.
   const EQ_PRESETS = [
     // The bypass, and the reference for any A/B. Keep it exactly zero.
-    ['Flat',   [0, 0, 0, 0,  0,  0, 0, 0]],
-    // Gentler low-mid lift than Music: speech carries little energy below
-    // 300Hz, and the boost spends headroom the limiter then reclaims from the
-    // midrange. Keeps most of the driver's natural presence — 2-4kHz carries
-    // consonants — while taking the harsh edge off the 3150 peak.
-    ['Speech', [0, 4, 2, 0, -2, -5, 0, 0]],
-    // The full measured correction, bounded by what this driver will stand.
-    // Stock puts +19.9dB at 250Hz; +8 is the honest fraction our ±12 range and
-    // the limiter leave room for, and it is a value to walk up by ear.
-    ['Music',  [0, 8, 3, 0, -3, -6, 0, 0]],
+    ['Flat',  [0,  0,  0, 0,  0,  0, 0,  0]],
+    ['Warm',  [0,  4,  0, 0, -3, -1, 2, -6]],
+    ['Clear', [0, -2, -3, 1,  4, -1, 0,  4]],
   ];
   const activeEqPreset = (EQ_PRESETS.find(([, vals]) => JSON.stringify(vals) === JSON.stringify(bands)) || [null])[0];
 
@@ -9958,9 +9946,6 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
           </div>
           <div>
             <div style={inputStyle}>
-              <Toggle label="Speech boost" sub="presence boost for voice" value={config.eqLoudness ?? false} onChange={v => set('eqLoudness', v)}/>
-            </div>
-            <div style={{ marginTop: 'var(--space-4)', ...inputStyle }}>
               <Toggle label="Speak while the reply is written"
                 sub="faster with a quick model; a slow one may pause"
                 value={config.streamReply ?? false} onChange={v => set('streamReply', v)}/>
@@ -10029,6 +10014,12 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             </div>
           </div>
         </div>
+        {/* Hidden on an Echo that voices its own speaker (stock_sound,
+            #229): its firmware keeps the guard on whatever this says, and
+            this is the only control in the section. Shown in the fleet view
+            and for an offline Echo, where it still governs older firmware
+            and the headphone jack. */}
+        {!stockSoundCapable && (
         <StageAdvanced open={advPlay} onToggle={() => setAdvPlay(o => !o)} disabledStyle={inputStyle}>
           <div style={inputStyle}>
             <Toggle label="Speaker protection"
@@ -10042,6 +10033,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             subtle by design and there is no reason to turn it off.
           </div>
         </StageAdvanced>
+        )}
       </Stage>
 
       {/* 02 WAKE WORD */}

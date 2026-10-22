@@ -309,3 +309,21 @@ func TestProcessWideNeverExceedsFullScale(t *testing.T) {
 		}
 	}
 }
+
+// The stock-sound voicing was tuned with the guard on, so a stored
+// bassGuardEnabled=false must not turn it off there; the plain chain (the
+// jack, older controllers) still honours it.
+func TestStockSoundKeepsTheGuardOn(t *testing.T) {
+	c := New(48000)
+	p := DefaultParams()
+	p.GuardEnabled = false
+	c.apply(p)
+	if !c.guard.enabled {
+		t.Error("stock sound: guard turned off by config")
+	}
+	p.StockSound = false
+	c.apply(p)
+	if c.guard.enabled {
+		t.Error("plain chain: guard should follow config")
+	}
+}

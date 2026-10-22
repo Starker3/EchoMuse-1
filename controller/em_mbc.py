@@ -244,8 +244,9 @@ class BassGuard:
                  upper_bands: bool = False):
         self.sample_rate = int(sample_rate)
         # Bypassed rather than absent, so a stream can be toggled without
-        # dropping the instance — see set_params.
-        self.enabled = bool(enabled)
+        # dropping the instance — see set_params. The stock-sound profile
+        # keeps it on: the voicing was tuned with it (outchain chain.apply).
+        self.enabled = bool(enabled) or bool(upper_bands)
         self.bass_guard_db = min(0.0, float(bass_guard_db))
         self.crossover_hz = float(crossover_hz)
 
@@ -310,7 +311,7 @@ class BassGuard:
             self.bass_guard_db = min(0.0, float(bass_guard_db))
             self._bass.floor_db = self._bass_floor_db()
         if enabled is not None:
-            self.enabled = bool(enabled)
+            self.enabled = bool(enabled) or self.upper_bands
 
     def process(self, samples: np.ndarray) -> np.ndarray:
         """Compress one chunk. Returns exactly as many samples as given."""

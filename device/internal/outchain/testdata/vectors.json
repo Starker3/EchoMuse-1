@@ -397,10 +397,10 @@
    ]
   ],
   "stats": {
-   "guardReductionDb": 0.0,
+   "guardReductionDb": 40.0,
    "limiterReductionDb": 0.0,
    "clipped": 0,
-   "clippedBypassed": 3211
+   "clippedBypassed": 1193
   }
  },
  {
