@@ -5416,5 +5416,5 @@ one conversation; a local model looped one tool call to HA's ten-iteration
 limit and answered "Unable to get response". Rebuilding
 the dev add-on from plain main stopped it at start: its database is at schema
 v32 from the unmerged stock-sound branch, and the check refused before writing
-anything. A radar (Echo Dot 3, FireOS 6, 32-bit kernel) is on the bench with
+anything. A radar (Echo gen 2, FireOS 6, 32-bit kernel) is on the bench with
 root adb.
