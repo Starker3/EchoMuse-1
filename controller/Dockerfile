@@ -124,6 +124,7 @@ ENV EM_CONTROLLER_VERSION=$EM_CONTROLLER_VERSION
 COPY em_controller.py .
 COPY em_api.py .
 COPY em_db.py .
+COPY em_boards.py .
 COPY em_auth.py .
 COPY em_eq.py .
 COPY em_limiter.py .
@@ -265,6 +266,7 @@ RUN EARCH="$(dpkg --print-architecture)" && case "$EARCH" in amd64) EPKG=linux-x
 ENV DB_PATH=/app/data/echomuse.db
 RUN mkdir -p /app/data
 COPY em_cacerts.py .
+COPY em_chunked.py .
 COPY em_start.py .
 # em_start.py bridges /data/options.json (Home Assistant add-on config) into
 # the env vars em_controller.py already reads, then execs into it — a no-op

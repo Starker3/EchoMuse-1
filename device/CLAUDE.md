@@ -302,8 +302,8 @@ switch, unity at 255, 4-channel S32 capture, a different radio).
 Under `owwOnDevice=on`, against a controller announcing `listen_session`, with
 a scorer loaded, the device is `local`: the always-on wake stream still runs
 and feeds the scorer, and **nothing is sent**. A crossing opens a session in
-`internal/listen.Gate`; the audio captured after the crossing frame goes up as
-`0x07` frames tagged with the session until the controller's `listen_close`
+`internal/listen.Gate`; the audio from `listen.WakeLead` (260ms) before the
+crossing frame goes up as `0x07` frames tagged with the session until the controller's `listen_close`
 (end of speech) or a device-side limit. `listen.Resolve` is the whole state
 decision and `syncListenState` reports it as `listen_state` on every config
 push and every connect.
@@ -319,9 +319,19 @@ push and every connect.
   it no longer degrades an `oww_local_only` device to "off".
 - **One timestamp per frame, taken once**, handed to both `PushBytesAt` and
   `Gate.Push`. The scorer reports the CAPTURE time of the crossing frame, not
-  when inference finished (its queue holds up to 640ms), and the session
-  starts with every ringed frame captured after it. Two clocks would
+  when inference finished (its queue holds up to 640ms). Two clocks would
   duplicate or drop the first word.
+- **The session starts `WakeLead` (260ms) before the crossing, counted in
+  FRAMES back from the crossing frame** (#1014). The scorer crosses a few
+  frames into a command run on from the wake word, so starting at the
+  crossing cut its first word on 5 of 9 VVV captures ("time is it?"). It is
+  counted in frames because the mic is read in 160ms batches: two frames
+  carry near-equal stamps and batches land 130-190ms apart, so a start chosen
+  by time moved by a frame. The window that works is about two frames wide
+  (240-280ms quiet, 180-340ms barge, 38 dumps replayed through HA's whisper,
+  2026-10-23); anchoring on the score's peak was tried and is no better,
+  since the score plateaus for 2-4 frames. The part of the first frame before
+  the lead is silenced on a copy: the ring's buffer is shared.
 - **A crossing inside an open session is words, not a wake** — `Gate.Open`
   refuses and `onWakeCrossing` drops it.
 - **`mic_stop` does not stop local listening, and does not end sessions.**
@@ -335,7 +345,21 @@ push and every connect.
 - **The barge bar applies to music too** (`speakerPlaying`), mirroring the
   controller's wake-over-music rule, and at that bar the scorer needs **two
   consecutive frames** — em_barge.decide's rule, now on the device because a
-  private Echo sends the controller nothing to decide over.
+  private Echo sends the controller nothing to decide over. **Such a crossing
+  is dated from the FIRST of the two frames**; dated from the second, the
+  barge session started a frame late and "stop" reached HA as "Nope".
+- **The Echo cuts its own reply at a barge crossing** (`listen.CutReplyOnBarge`,
+  #1014), instead of waiting a round trip for the controller's `speaker_flush`
+  (1.3s late on a stalled link). Only while the reply is still to be heard
+  (`replyStillHeard`): the barge flag stays true for `ScoreSpan` after a reply
+  ends, and a cut there flushed a silent speaker. Up to ~210ms (the ALSA ring
+  plus a period) still plays after the cut and is sent with the session.
+  **Dropping that reply audio from the session was built and removed**: it
+  fixed "Oh, never mind" after a pause, but once the session started earlier
+  and the Echo cut its own reply the pause case was clean without it, and it
+  ate a command run on from the wake word ("it." for "what time is it").
+  Dropping the ALSA ring on the cut is the untried next step; it needs a
+  GoTinyAlsa change and would click ducked music.
 - **Older controllers keep the old behaviour.** Without `listen_session` the
   state is `stream` in every mode, because an old controller only acts on a
   device wake when stream frames are arriving.
@@ -986,19 +1010,37 @@ Why this shape: Bermuda (source, 2026-07) re-decides areas every 1.05s,
 refuses adverts older than 10s for an area contest and calls a device away
 after 30s, and even a continuous scan gave nearby devices a fresh advert in
 only 35-77% of its cycles. A voice turn's few seconds fit that; music does
-not (hours), so music gets BURSTS instead of a yield (`bluetooth.MusicDuty`,
-2026-09-27): 2s of scan every 7s, and none while less than 2.5s of music is
-buffered. The 7s cycle sits inside Bermuda's 10s area age for any device that
-advertises within the 2s burst. Scanning straight through music was the
-earlier rule and it failed: on VVV with Music Assistant, 23 RTT excursions
-over 250ms in 2.7 min (worst 2.1s) and 15+ audible dropouts, none with the
-proxy off. Music Assistant hands an HA media player a flow stream at 1.03x
-real time after a 3s burst, so the buffer never holds more than ~5s and cannot
-ride out a 2s stall. **Known gap:** the controller paces music from a clock
-estimate, not from the device's buffer, so after a real dropout the buffer
-stays low for the rest of that stream and the 2.5s floor keeps the scan off
-until it ends. The fix is a device-reported buffer level. A controller-scoring
-device's always-on stream does not count as a turn. Remaining idle loss
+not (hours), so music gets BURSTS instead of a yield (`bluetooth.MusicDuty`). Scanning
+straight through music was the earlier rule and it failed: on VVV with Music
+Assistant, 23 RTT excursions over 250ms in 2.7 min (worst 2.1s) and 15+
+audible dropouts, none with the proxy off.
+
+**Bursts are sized from the buffer, never the clock (#1004, 2026-10-22).**
+The first duty was 2s of scan every 7s, none below 2.5s buffered, and on
+Sendspin it never ran: Music Assistant streams a LIVE source (Spotify,
+radio, plugin sources) at exactly the player's declared `min_buffer_ms`,
+which was 2000 — 1862ms measured against aiosendspin 9.1.1 — while library
+tracks get up to 30s (`_PRODUCER_BUFFER_LIMIT_US`). How much a source buffers
+is the source's choice, so: a burst starts once 5s have passed and the lead
+covers the reserve plus 0.5s, and ends after 2s or the moment the lead falls
+to the reserve. The reserve (start 1.5s, 1–3s) is LEARNED from the lowest
+lead between a burst's start and the buffer's recovery: under 750ms raises
+it by the shortfall, a clean burst lowers it 100ms. A link still short at the
+3s cap backs the bursts off fourfold to 5 min, because each probe there can
+cost a dropout: the music wins, and the lost presence is counted. A lead that
+falls faster than real time is a flush or seek and teaches nothing. The HA
+music plane runs ~5s ahead (a flow stream at 1.03x) and, paced from a clock
+estimate, stays low after a real dropout; it now gets short bursts there
+rather than none for the rest of the stream. While the
+proxy is on, the Sendspin player declares `bluetooth.MusicHeadroom` (4s) and
+gets 3812ms on a live source; the cost is that a group containing that Echo
+starts and responds ~2s later. Stats carry `ble.music` (bursts, scanMs, cut,
+nearMisses, lowMarginMs, reserveMs, starved, starvedMs), and the log says
+`[ble] no scan for 8s of music` with the lead and what a burst needed — that
+is the line to read when someone reports Bermuda going quiet during music.
+The tests simulate a link that stalls for the whole burst plus a tail, and
+assert both goals: never dry, and no gap past 8s (Bermuda's AREA_MAX_AD_AGE
+is 10s). A controller-scoring device's always-on stream does not count as a turn. Remaining idle loss
 (pings, keepalives) is for TCP tolerance to absorb, not the scanner.
 
 **The mechanism was our own traffic on the liveness channel.**

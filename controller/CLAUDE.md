@@ -330,12 +330,19 @@ reply worked and then reported a failure. It ends on `done_anim`, a fixed
 solid green for 1s (Wil, 2026-10-21: the thinking ring then dark read as cut
 off). A `TTS_START` with no URL after it stays `no_tts`. With an LLM agent,
 HA only tries its own sentences when "Prefer handling commands locally" is
-on. **Over a reply it is not yet reliable** (VVV, 2026-10-21): the barge-in
-turn's transcript was `" one quince. Never mind."`, its first 640ms loud,
-most likely the reply still playing through the 250ms arbitration hold
-before the flush; with extra words HA does not match the sentence and the
-LLM answered 11s later. Unconfirmed, and the fix (flush at the wake, before
-arbitration) is not built.
+on. **Over a reply it works since #1007 and #1014** (VVV, 2026-10-23): on
+2026-10-21 the barge-in turn's transcript was `" one quince. Never mind."`,
+the reply still playing through the 250ms arbitration hold before the flush,
+so HA did not match the sentence and the LLM answered 11s later. Both barge
+paths now flush BEFORE the claim (`tests/test_barge_flush_order.py`), and the
+Echo cuts its own reply at the crossing. Two faults that order exposed:
+the reply can end inside the hold, so the turn recorded `ok` before
+`abort_ha_run` set `barged` (`note_barged` now marks it at the flush); and
+the turn loop started the interrupting turn before the claim resolved, which
+killed it in 199ms (`Device.barge_decided` / `_await_barge_decision`,
+bounded by `BARGE_DECISION_TIMEOUT_S` 3s). A one-word command over a reply
+still fails sometimes ("stop" 2 of 5, heard as "Go."/"Storpe."): whisper
+flips on it with the reply tail under it.
 
 **The protocol has NO run identifier, and HA does not serialise runs.**
 `VoiceAssistantEventResponse` is an event type plus a name/value list and
@@ -535,9 +542,9 @@ by the vendored protobuf and read by nothing. Four rules:
 - **The wake-tail discard is for a stream the controller scored, never for a
   session** (#829, `em_listen.tail_discard`). `VOICE_PREROLL_DISCARD` drops
   240ms from the start of a wake turn to keep the end of the wake word out of
-  the transcript. An Echo that detects its own wake word starts the session
-  AFTER the frame that crossed (docs/listening.md), and reports the wake once
-  the word has finished, so on a session the 240ms was the command: "hey
+  the transcript. An Echo that detects its own wake word trims the session
+  itself (`listen.WakeLead`, docs/listening.md), so on a session the 240ms
+  was the command: "hey
   Verona tell me a joke" in one breath reached STT as "me a joke". Measured
   2026-10-09: four run-on recordings began mid-speech at 0-80ms; with the
   discard off, 14 commands (run-on, paused and barge-in) kept their first word
@@ -2175,6 +2182,13 @@ throughout — so the rules below are all one rule seen from different angles.
   against real headers, and returning 0 (send everything) on anything it does
   not understand, because a size optimisation must never be why a build cannot
   happen.
+  **The image then crosses in 512 KB pieces** (#800, `em_chunked`,
+  `/api/provision/upload_chunk`): ~9MB was still over nginx's 1MB default, and
+  #769 and #1001 stopped at a 413 in front of Home Assistant. The build POST
+  names the upload (`reference_upload`, `init_upload`) and takes it once; the
+  pieces live in memory only, for the reason nothing else here is stored. Run
+  through a stock `nginx:alpine` on 2026-10-22: one 9MB POST 413, the same
+  bytes in 19 pieces built.
 - **The emOS flow must leave a `wpa_supplicant.conf` behind.** emOS starts the
   supplicant with `-c/data/misc/wifi/wpa_supplicant.conf` and the control
   socket comes from `ctrl_interface` INSIDE that file, so with no file there is
