@@ -134,6 +134,9 @@ class _EmosIO:
 
     def __init__(self, device_id: str, live, override: tuple | None):
         self.device_id, self.live, self.override = device_id, live, override
+        # As its firmware reported it: the packer needs it for a board whose
+        # image carries a recipe (em_emos_build.CMDLINE_RECIPES).
+        self.board = em_state.boards.get(device_id)
 
     async def sh(self, cmd: str, timeout: float) -> str:
         return await _emos_sh(self.live, cmd, timeout)

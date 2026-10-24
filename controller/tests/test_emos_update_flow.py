@@ -267,6 +267,27 @@ def test_an_update_ends_confirmed_on_the_new_image(tmp_path, arch):
     assert io.records[0][0] == "emos-v0.9" and io.records[-1][0] == "emos-v0.10"
 
 
+def test_the_update_builds_for_the_board_the_device_reported(tmp_path):
+    # A board's recipe (em_emos_build.CMDLINE_RECIPES) has to reach the build
+    # on an update as well as at provisioning, or a donut's rebuilt image would
+    # keep its old ramdisk size and gain a cmdline its LK cuts off.
+    old = installed("emos-v0.9", arch="arm64")
+    dev = Device(tmp_path, old)
+    io = IO(dev)
+    io.board = "biscuit"
+    seen = []
+    real = io.offload
+
+    async def offload(fn, *args):
+        if fn is eb.build_emos_image:
+            seen.append(args)
+        return await real(fn, *args)
+
+    io.offload = offload
+    assert run(io) == "emos-v0.10"
+    assert seen and seen[0][-1] == "biscuit"
+
+
 def test_the_fos6_payload_rides_into_the_image(tmp_path):
     old = installed("emos-v0.9", arch="arm")
     dev = Device(tmp_path, old)
