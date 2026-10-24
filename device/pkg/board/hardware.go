@@ -147,11 +147,11 @@ var biscuitHardware = &Hardware{
 // differs is the speaker. No number fallbacks: radar has no builds from
 // before boards were told apart.
 var radarHardware = &Hardware{
-	DotKeys:     Input{Name: "mtk-kpd"},
-	VolumeKeys:  Input{Name: "keys"},
-	LEDRing:     I2C{Driver: "is31fl3236"},
-	Capture:     PCM{Name: "TLV320AIC3101 Capture"},
-	Playback:    PCM{Name: "TLV320AIC3204 Playback"},
+	DotKeys:    Input{Name: "mtk-kpd"},
+	VolumeKeys: Input{Name: "keys"},
+	LEDRing:    I2C{Driver: "is31fl3236"},
+	Capture:    PCM{Name: "TLV320AIC3101 Capture"},
+	Playback:   PCM{Name: "TLV320AIC3204 Playback"},
 	// Only the 2540 has been seen on radar (035T, 07MU).
 	LightSensors: []LightSensor{{Driver: "tsl2540", Attr: "als_lux", Bus: BusI2C}},
 	HCI:          "/dev/stpbt",
