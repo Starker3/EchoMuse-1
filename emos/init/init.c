@@ -47,7 +47,15 @@
 #define CACHE     "/dev/block/mmcblk0p15"
 #define USBDIR    "/sys/class/android_usb/android0"
 #define TTY       "/dev/ttyGS0"
-#define TRAIL_OFF 1024
+/* The raw trail fits in the 1024 bytes before ext4's superblock, the only
+ * part of the cache filesystem ext4 never reads or writes. Writing from 1024
+ * destroyed the superblock on every boot: biscuit's cache recovers it from a
+ * backup group, the donut's 32 MB single-group cache has none (2026-10-24). */
+#define TRAIL_RAW 1024
+/* The whole trail, once /data is mounted. */
+#ifndef TRAILFILE
+#define TRAILFILE "/data/emos/trail"
+#endif
 
 
 /* Device nodes, made from what the kernel says it registered.
@@ -1240,6 +1248,12 @@ static long mono_ms(void)
     return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
 }
 
+/* The trail file, open from /data's mount to the shutdown. Kept at its full
+ * size so that each line is one pwrite and an fdatasync with no change of
+ * size: one data block per line, no journal commit, which matters to an eMMC
+ * that cannot be replaced. */
+static int trail_fd = -1;
+
 static void note(const char *fmt, ...)
 {
     char line[256];
@@ -1255,12 +1269,47 @@ static void note(const char *fmt, ...)
     n += p;
     if (n > (int)sizeof line - 1)
         n = sizeof line - 1;
-    if (trail_len + n + 1 < sizeof trail) {
-        memcpy(trail + trail_len, line, n);
-        trail_len += n;
-        trail[trail_len] = 0;
+    /* Full: nothing new to write, so nothing is written. */
+    if (trail_len + n + 1 >= sizeof trail)
+        return;
+    size_t off = trail_len;
+    memcpy(trail + trail_len, line, n);
+    trail_len += n;
+    trail[trail_len] = 0;
+
+    /* The raw 1024 is zeroed by the first line of each boot, so a shorter
+     * trail never leaves an earlier boot's tail to be misread; after that each
+     * line is written at its own offset until the 1024 is full. */
+    static int raw_fresh;
+    if (!raw_fresh) {
+        char raw[TRAIL_RAW] = { 0 };
+        memcpy(raw, trail, trail_len < TRAIL_RAW ? trail_len : TRAIL_RAW);
+        write_at(0, raw, sizeof raw);
+        raw_fresh = 1;
+    } else if (off < TRAIL_RAW) {
+        write_at(off, line, off + n <= TRAIL_RAW ? (size_t)n : TRAIL_RAW - off);
     }
-    write_at(TRAIL_OFF, trail, trail_len);
+    if (trail_fd >= 0) {
+        if (pwrite(trail_fd, line, n, off) == n)
+            fdatasync(trail_fd);
+    }
+}
+
+/* Called once /data is mounted. The file is opened without O_TRUNC and
+ * rewritten whole at its fixed size, so after the first boot it keeps the
+ * blocks it already has. */
+static void trail_open(void)
+{
+    mkdir("/data/emos", 0755);
+    int fd = open(TRAILFILE, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    if (fd < 0)
+        return;
+    if (pwrite(fd, trail, sizeof trail, 0) != (ssize_t)sizeof trail) {
+        close(fd);
+        return;
+    }
+    fsync(fd);
+    trail_fd = fd;
 }
 
 static int wr(const char *path, const char *val)
@@ -2580,8 +2629,6 @@ static int tool_main(int argc, char **argv)
 
 int main(int argc, char **argv)
 {
-    char buf[512];
-
     if (getpid() != 1)
         return tool_main(argc, argv);
 
@@ -2617,15 +2664,7 @@ int main(int argc, char **argv)
     mkdir("/dev/pts", 0755);
     mount("devpts", "/dev/pts", "devpts", 0, NULL);
 
-    snprintf(buf, sizeof buf, "EM64-INIT-OK acm-console\n");
-    write_at(0, buf, strlen(buf));
-
-    int fd = open("/proc/version", O_RDONLY);
-    if (fd >= 0) {
-        int n = read(fd, buf, sizeof buf - 1);
-        close(fd);
-        if (n > 0) write_at(512, buf, n);
-    }
+    note("EM64-INIT-OK acm-console\n");
     note("stage=mounts done devtmpfs_rc=%d nodes=%d tty=%d\n", dtr, nodes,
          access(TTY, F_OK));
     led_claim();
@@ -2709,7 +2748,22 @@ int main(int argc, char **argv)
     led_step();                                  /* 3: fsck /data */
 
     r = mount("/dev/block/mmcblk0p16", "/data", "ext4", 0, NULL);
+    if (r == 0)
+        trail_open();
     note("stage=mount_data rc=%d errno=%d\n", r, r ? errno : 0);
+    /* Which kernel booted, in the file only: it is ~200 bytes the raw 1024
+     * cannot spare, and only matters once the boot gets this far. */
+    int vfd = open("/proc/version", O_RDONLY);
+    if (vfd >= 0) {
+        char v[200];
+        int vn = read(vfd, v, sizeof v - 1);
+        close(vfd);
+        if (vn > 0) {
+            v[vn] = 0;
+            v[strcspn(v, "\n")] = 0;
+            note("kernel %s\n", v);
+        }
+    }
     if (r) led_fail(); else led_step();          /* 4: /data */
 
     /* Android's own root has these two symlinks and a surprising amount of
@@ -3604,8 +3658,12 @@ static void do_shutdown(void)
     run_wait(dump);
     sync();
     sync();
-    mount(NULL, "/data", NULL, MS_REMOUNT | MS_RDONLY, NULL);
     note("stage=shutdown done\n");
+    if (trail_fd >= 0) {
+        close(trail_fd);
+        trail_fd = -1;
+    }
+    mount(NULL, "/data", NULL, MS_REMOUNT | MS_RDONLY, NULL);
     sync();
     reboot(RB_AUTOBOOT);
 }
