@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/wilbowes/EchoMuse/internal/outchain"
+	"github.com/wilbowes/EchoMuse/pkg/board"
 )
 
 func settledVolume(level int) *softVolume {
@@ -202,13 +203,13 @@ func TestMixResponseFiltersVoiceNotMusic(t *testing.T) {
 	var mixer Mixer
 	mixer.SetGainImmediate(unityGain)
 	got := mixer.MixResponse(make([]float64, frames*2), period(frames, 0), period(frames, 1000), unityGain,
-		gains, outchain.NewVoiceFilter(48000))
+		gains, outchain.NewVoiceFilter(48000, board.BiscuitVoicing()))
 	for i, x := range got {
 		if x != 1000 {
 			t.Fatalf("sample %d: music came out %v, want 1000", i, x)
 		}
 	}
-	vf, ref := outchain.NewVoiceFilter(48000), outchain.NewVoiceFilter(48000)
+	vf, ref := outchain.NewVoiceFilter(48000, board.BiscuitVoicing()), outchain.NewVoiceFilter(48000, board.BiscuitVoicing())
 	got = mixer.MixResponse(make([]float64, frames*2), period(frames, 8000), nil, unityGain, gains, vf)
 	for i := 0; i < frames; i++ {
 		for ch := 0; ch < 2; ch++ {

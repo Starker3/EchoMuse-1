@@ -1,6 +1,8 @@
 package outchain
 
 import (
+	"github.com/wilbowes/EchoMuse/pkg/board"
+
 	"compress/gzip"
 	"encoding/binary"
 	"io"
@@ -30,7 +32,7 @@ func TestVoiceFilterMatchesController(t *testing.T) {
 	if len(raw) != len(in)*8 {
 		t.Fatalf("%d outputs for %d inputs", len(raw)/8, len(in))
 	}
-	v := NewVoiceFilter(48000)
+	v := NewVoiceFilter(48000, board.BiscuitVoicing())
 	for pass := 0; pass < 2; pass++ {
 		for ch := 0; ch < 2; ch++ {
 			for i, x := range in {

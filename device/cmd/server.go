@@ -1433,7 +1433,7 @@ func playVolumeCue(spk *speaker.PcmSpeaker, level int) {
 	if spk == nil {
 		return
 	}
-	spk.PlayCue(cue.VolumeCue(speakerRate, speaker.CueVolumeGain(level, spk.StockLaw())))
+	spk.PlayCue(cue.VolumeCue(speakerRate, spk.CueGain(level)))
 }
 
 // speakerRate mirrors the speaker binding's rate, declared here so this file

@@ -1,43 +1,32 @@
 package outchain
 
-import "math"
+import (
+	"math"
+
+	"github.com/wilbowes/EchoMuse/pkg/board"
+)
 
 // The stock-sound profile (#229, #247): a driver correction after the user's
-// EQ, and three gentle compressor bands above the bass guard. A port of
-// em_eq.correction_sos and em_mbc.BassGuard(upper_bands=True), held to the
-// same vectors as the rest of the chain.
+// EQ, and three compressor bands above the bass guard, all from the board's
+// own Voicing. A port of em_eq.correction_sos and
+// em_mbc.BassGuard(upper_bands=True), held to the same vectors as the rest
+// of the chain with biscuit's numbers.
 
-// Driver correction: four peaks and an S=1 high shelf, a voicing chosen by
-// ear from this speaker's measured response (em_eq.CORRECTION_PEAKS /
-// CORRECTION_SHELF).
-var correctionPeaks = [4][3]float64{ // Hz, dB, Q
-	{174.9, 26.13, 0.388},
-	{3277.5, -10.94, 0.753},
-	{576.3, -10.93, 0.735},
-	{8707.8, 5.52, 2.985},
-}
+// VoiceFilter is em_eq.voice_sos, one cascade per channel. A board with no
+// voicing gets an empty one, which passes the voice through.
+type VoiceFilter struct{ s [2][]biquad }
 
-var correctionShelf = [2]float64{11874.4, 12.0} // Hz, dB
-
-// voicePeaks (em_eq.VOICE_PEAKS): the voice plane's own filter, applied
-// before the mix: stock's warmth for speech on top of the shared curve.
-var voicePeaks = [3][3]float64{ // Hz, dB, Q
-	{228.0, 3.0, 0.76},
-	{2105.5, -2.8, 1.25},
-	{8583.1, -5.17, 5.0},
-}
-
-// VoiceFilter is em_eq.voice_sos, one cascade per channel.
-type VoiceFilter struct{ s [2][3]biquad }
-
-func NewVoiceFilter(fs float64) *VoiceFilter {
-	v := &VoiceFilter{}
-	for ch := range v.s {
-		for i, p := range voicePeaks {
-			v.s[ch][i] = peaking(p[0], p[1], p[2], fs)
+func NewVoiceFilter(fs float64, v *board.Voicing) *VoiceFilter {
+	f := &VoiceFilter{}
+	if v == nil {
+		return f
+	}
+	for ch := range f.s {
+		for _, p := range v.Voice {
+			f.s[ch] = append(f.s[ch], peaking(p.Hz, p.Db, p.Q, fs))
 		}
 	}
-	return v
+	return f
 }
 
 // Step filters one sample of channel ch (0 or 1).
@@ -57,24 +46,22 @@ func (v *VoiceFilter) Reset() {
 	}
 }
 
-// An LR4 high-pass and a 65Hz notch under the peaks, which otherwise boost
-// 30-80Hz by 11-28dB where stock's curve is near 0dB, and the driver
-// distorted on that (em_eq.CORRECTION_HIGHPASS_HZ / CORRECTION_NOTCH).
-const correctionHighpassHz = 80.0
+// correction is the voicing's peaks and shelf, then the notch and an LR4
+// high-pass under them (em_eq.correction_sos's order).
+type correction struct{ s []biquad }
 
-var correctionNotch = [3]float64{65.0, -25.0, 4.0} // Hz, dB, Q
-
-type correction struct{ s [8]biquad }
-
-func newCorrection(fs float64) correction {
+func newCorrection(fs float64, v *board.Voicing) correction {
 	var c correction
-	for i, p := range correctionPeaks {
-		c.s[i] = peaking(p[0], p[1], p[2], fs)
+	if v == nil {
+		return c
 	}
-	c.s[4] = highShelf(correctionShelf[0], correctionShelf[1], fs)
-	c.s[5] = peaking(correctionNotch[0], correctionNotch[1], correctionNotch[2], fs)
-	hp := butter2(correctionHighpassHz, fs, true)
-	c.s[6], c.s[7] = hp, hp
+	for _, p := range v.Correction {
+		c.s = append(c.s, peaking(p.Hz, p.Db, p.Q, fs))
+	}
+	c.s = append(c.s, highShelf(v.Shelf.Hz, v.Shelf.Db, fs),
+		peaking(v.Notch.Hz, v.Notch.Db, v.Notch.Q, fs))
+	hp := butter2(v.HighpassHz, fs, true)
+	c.s = append(c.s, hp, hp)
 	return c
 }
 
@@ -90,29 +77,6 @@ func (c *correction) reset() {
 		c.s[i].reset()
 	}
 }
-
-// upperLaws (em_mbc.UPPER_LAWS): ratio, threshold dBFS and attack ms for
-// 115-500Hz, 500Hz-7.5kHz and above. The first is harder than stock's 2:1
-// from -10, because this driver's 2nd harmonic at 150-300Hz rises with level.
-var upperLaws = [3][3]float64{
-	{3.0, -16.0, 20.0},
-	{2.0, -10.0, 10.0},
-	{2.0, -10.0, 10.0},
-}
-
-// Upper bands (em_mbc.UPPER_*): stock's MBCL crossovers.
-const (
-	upperFloorDb   = -40.0
-	upperReleaseMs = 100.0
-	// stockBassFloorDb: stock's band 1 floor; the profile uses the deeper of
-	// it and GuardDb (em_mbc.STOCK_BASS_FLOOR_DB).
-	stockBassFloorDb = -40.0
-	// Hold before release (em_mbc.STOCK_BASS_HOLD_MS / STOCK_UPPER_HOLD_MS):
-	// without it the gain recovers between a waveform's peaks and is cut
-	// again on the next, 1% THD at 150-200Hz.
-	stockBassHoldMs  = 20.0
-	stockUpperHoldMs = 30.0
-)
 
 // holdMin is the minimum of the last n values pushed, by a monotonic deque:
 // em_mbc._BandGain's trailing minimum_filter1d, one sample at a time. Its
@@ -147,8 +111,6 @@ func (h *holdMin) push(v float64) float64 {
 
 func (h *holdMin) reset() { h.t, h.head, h.size = 0, 0, 0 }
 
-var upperCrossovers = [2]float64{500, 7500}
-
 // allpass2 is the second-order allpass an LR4 crossover's halves sum to
 // (em_mbc._allpass2), for a band that skips that crossover.
 func allpass2(fc, fs float64) biquad {
@@ -170,13 +132,19 @@ type upperBands struct {
 	// gain on every new peak, heard as grit on VVV.
 	attack         [3]float64
 	thresholdLn    [3]float64
+	laws           [3]board.BandLaw
+	floorDb        float64
 	slew           float64
 	maxReductionDb float64
 }
 
-func newUpperBands(fs float64) *upperBands {
-	u := &upperBands{slew: releaseReferenceDb / (math.Max(0.1, upperReleaseMs) / 1000) / fs}
-	f2, f3 := upperCrossovers[0], upperCrossovers[1]
+func newUpperBands(fs float64, v *board.Voicing) *upperBands {
+	u := &upperBands{
+		slew:    releaseReferenceDb / (math.Max(0.1, v.UpperReleaseMs) / 1000) / fs,
+		laws:    v.Upper,
+		floorDb: v.UpperFloorDb,
+	}
+	f2, f3 := v.Crossovers[0], v.Crossovers[1]
 	lo2, hi2 := butter2(f2, fs, false), butter2(f2, fs, true)
 	lo3, hi3 := butter2(f3, fs, false), butter2(f3, fs, true)
 	u.lp2, u.hp2 = [2]biquad{lo2, lo2}, [2]biquad{hi2, hi2}
@@ -184,11 +152,11 @@ func newUpperBands(fs float64) *upperBands {
 	u.loAP = [2]biquad{allpass2(f2, fs), allpass2(f3, fs)}
 	u.b2AP = allpass2(f3, fs)
 	for i := range u.hold {
-		u.hold[i] = newHoldMin(stockUpperHoldMs, fs)
+		u.hold[i] = newHoldMin(v.UpperHoldMs, fs)
 	}
-	for i, law := range upperLaws {
-		u.attack[i] = 1 - math.Exp(-1/(law[2]*fs/1000))
-		u.thresholdLn[i] = fullScale * math.Pow(10, law[1]/20)
+	for i, law := range v.Upper {
+		u.attack[i] = 1 - math.Exp(-1/(law.AttackMs*fs/1000))
+		u.thresholdLn[i] = fullScale * math.Pow(10, law.ThresholdDb/20)
 	}
 	return u
 }
@@ -199,7 +167,7 @@ func (u *upperBands) bandGain(i int, x float64) float64 {
 	target := 0.0
 	if a := math.Abs(x); a > u.thresholdLn[i] {
 		levelDb := 20 * math.Log10(a/fullScale)
-		target = max(-(levelDb-upperLaws[i][1])*(1-1/upperLaws[i][0]), upperFloorDb)
+		target = max(-(levelDb-u.laws[i].ThresholdDb)*(1-1/u.laws[i].Ratio), u.floorDb)
 	}
 	target = u.hold[i].push(target)
 	// scipy's lfilter order (b0*x + z, z = -a1*y), each product rounded on

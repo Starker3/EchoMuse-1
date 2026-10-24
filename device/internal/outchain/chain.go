@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"github.com/wilbowes/EchoMuse/pkg/board"
 )
 
 // Params is the chain's whole configuration. Defaults match
@@ -18,8 +20,9 @@ type Params struct {
 	LimiterEnabled     bool
 	LimiterThresholdDb float64
 	LimiterReleaseMs   float64
-	// StockSound adds the driver correction and the three compressor bands
-	// above the guard (#229). The device's volume law and order change with
+	// StockSound adds the board's voicing: the driver correction and the
+	// three compressor bands above the guard (#229). It has no effect on a
+	// board with no voicing. The device's volume law and order change with
 	// it; see speaker.PcmSpeaker.
 	StockSound bool
 }
@@ -97,6 +100,7 @@ type Chain struct {
 
 	// Owned by the ALSA goroutine.
 	params  Params
+	voicing *board.Voicing // nil: StockSound is never in force
 	eq      eq
 	guard   *bassGuard
 	corr    correction
@@ -106,19 +110,22 @@ type Chain struct {
 }
 
 // New builds a chain at the given sample rate, inactive, with DefaultParams
-// and biscuit's bass band.
-func New(sampleRate int) *Chain { return NewFor(sampleRate, DefaultGuardBand) }
+// and biscuit's bass band and voicing.
+func New(sampleRate int) *Chain {
+	return NewFor(sampleRate, DefaultGuardBand, board.BiscuitVoicing())
+}
 
-// NewFor is New with the bass band of the board's own driver.
-func NewFor(sampleRate int, band GuardBand) *Chain {
+// NewFor is New with the board's own bass band and voicing (nil for none).
+func NewFor(sampleRate int, band GuardBand, v *board.Voicing) *Chain {
 	fs := float64(sampleRate)
 	c := &Chain{
-		fs:    fs,
-		eq:    eq{fs: fs},
-		guard: newBassGuard(fs, band),
-		corr:  newCorrection(fs),
-		lim:   newLimiter(fs),
-		idle:  true,
+		fs:      fs,
+		voicing: v,
+		eq:      eq{fs: fs},
+		guard:   newBassGuard(fs, band),
+		corr:    newCorrection(fs, v),
+		lim:     newLimiter(fs),
+		idle:    true,
 	}
 	c.apply(DefaultParams())
 	return c
@@ -142,6 +149,9 @@ func (c *Chain) SetParams(p Params) {
 }
 
 func (c *Chain) apply(p Params) {
+	// Cleared rather than ignored, so everything downstream (the speaker's
+	// volume law, the log line) reads what is in force.
+	p.StockSound = p.StockSound && c.voicing != nil
 	c.params = p
 	c.eq.set(p.Bands, p.Loudness)
 	// The voicing was tuned with the guard on, and drives the chain past
@@ -149,7 +159,7 @@ func (c *Chain) apply(p Params) {
 	c.guard.enabled = p.GuardEnabled || p.StockSound
 	c.guard.floorDb = math.Min(p.GuardDb, 0)
 	if p.StockSound {
-		c.guard.floorDb = math.Min(c.guard.floorDb, stockBassFloorDb)
+		c.guard.floorDb = math.Min(c.guard.floorDb, c.voicing.BassFloorDb)
 	}
 	c.lim.enabled = p.LimiterEnabled
 	// The profile's extra filters start cold when it turns on (one phase
@@ -157,8 +167,8 @@ func (c *Chain) apply(p Params) {
 	// the default path stays bit-exact.
 	switch {
 	case p.StockSound && c.guard.upper == nil:
-		c.guard.upper = newUpperBands(c.fs)
-		c.guard.hold = newHoldMin(stockBassHoldMs, c.fs)
+		c.guard.upper = newUpperBands(c.fs, c.voicing)
+		c.guard.hold = newHoldMin(c.voicing.BassHoldMs, c.fs)
 		c.corr.reset()
 	case !p.StockSound:
 		c.guard.upper = nil
@@ -177,8 +187,9 @@ func (c *Chain) takePending() (Params, bool) {
 	if p == nil {
 		return c.params, false
 	}
-	changed := *p != c.params
+	prev := c.params
 	c.apply(*p)
+	changed := c.params != prev
 	return c.params, changed
 }
 

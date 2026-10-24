@@ -3,22 +3,27 @@ package speaker
 import (
 	"math"
 	"testing"
+
+	"github.com/wilbowes/EchoMuse/pkg/board"
 )
+
+// ceiling is biscuit's, which em_volume.STOCK_CEILING_DB is held to.
+var ceiling = board.BiscuitVoicing().CeilingDb
 
 // Held to em_volume.stock_level_db: the two must give the same dB for every
 // level.
 func TestStockVolumeMatchesTheController(t *testing.T) {
 	want := map[int]float64{1: -53, 13: -47, 47: -30, 64: -21.5, 89: -9, 114: 3.5, 126: 9.5, 127: 10}
 	for level, db := range want {
-		got, ok := StockVolumeDb(level)
+		got, ok := StockVolumeDb(level, ceiling)
 		if !ok || math.Abs(got-db) > 1e-9 {
 			t.Errorf("level %d: %v dB, want %v", level, got, db)
 		}
 	}
-	if _, ok := StockVolumeDb(0); ok {
+	if _, ok := StockVolumeDb(0, ceiling); ok {
 		t.Error("level 0 must be silence")
 	}
-	if StockVolumeGain(0) != 0 {
+	if StockVolumeGain(0, ceiling) != 0 {
 		t.Error("level 0 gain must be 0")
 	}
 }
@@ -27,8 +32,8 @@ func TestStockVolumeMatchesTheController(t *testing.T) {
 // must be the same 4dB, all the way to the top.
 func TestEveryButtonPressIsFourDb(t *testing.T) {
 	for level := 47; level+8 <= 127; level += 8 {
-		a, _ := StockVolumeDb(level)
-		b, _ := StockVolumeDb(level + 8)
+		a, _ := StockVolumeDb(level, ceiling)
+		b, _ := StockVolumeDb(level+8, ceiling)
 		if math.Abs(b-a-4) > 1e-9 {
 			t.Errorf("press %d -> %d: %v dB, want 4", level, level+8, b-a)
 		}
@@ -38,7 +43,7 @@ func TestEveryButtonPressIsFourDb(t *testing.T) {
 func TestStockVolumeNeverFallsAsLevelRises(t *testing.T) {
 	prev := math.Inf(-1)
 	for level := 1; level <= 127; level++ {
-		db, _ := StockVolumeDb(level)
+		db, _ := StockVolumeDb(level, ceiling)
 		if db < prev {
 			t.Fatalf("level %d: %v dB after %v", level, db, prev)
 		}
@@ -61,10 +66,10 @@ func TestResponseCapNeverCuts(t *testing.T) {
 // the level the music will play at.
 func TestCueFollowsTheLawInForce(t *testing.T) {
 	for _, level := range []int{1, 47, 89, 127} {
-		if got, want := CueVolumeGain(level, true), StockVolumeGain(level); got != want {
+		if got, want := CueVolumeGain(level, board.BiscuitVoicing()), StockVolumeGain(level, ceiling); got != want {
 			t.Errorf("stock, level %d: %v, want %v", level, got, want)
 		}
-		if got, want := CueVolumeGain(level, false), VolumeGain(level); got != want {
+		if got, want := CueVolumeGain(level, nil), VolumeGain(level); got != want {
 			t.Errorf("plain, level %d: %v, want %v", level, got, want)
 		}
 	}

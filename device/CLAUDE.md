@@ -230,20 +230,25 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
 
 **Firmware that announces `stock_sound` always voices its own speaker; there
 is no key to turn it off** (Wil, 2026-10-22: replace the legacy sound as soon
-as possible). While the chain runs on the device and no plug is in the jack,
+as possible). **The voicing is board data** (`board.Speaker.Voicing`,
+`pkg/board/voicing.go`, Wil 2026-10-24): every number is measured on that
+board's driver, so a board with none (radar, until it is measured) plays the
+plain chain with its own bass band and does not announce `stock_sound`, and
+`outchain` clears `StockSound` from the params in force so the speaker keeps
+the plain law. While the chain runs on the device and no plug is in the jack,
 the order is volume → user EQ → driver correction → bass guard + three upper
 compressor bands → limiter (`outchain`, with `speaker.refreshStock` choosing
 the law). With a plug in, or behind a controller that processes the audio
 itself, the plain chain and the old law stay, because the correction is for
 this driver and nothing else.
 
-- **Volume law** (`StockVolumeDb`): the plain 0.5dB per level lifted 10dB, so
-  unity is level 107 and the top 20 levels push into the compressors. Applied
+- **Volume law** (`StockVolumeDb`): the plain 0.5dB per level lifted by the
+  voicing's `CeilingDb` (biscuit: 10dB), so unity is level 107 and the top 20 levels push into the compressors. Applied
   in float BEFORE the chain. Stock's own 31-step table was measured and
   dropped: uneven presses, and its top 30% bought compression, not loudness.
   The volume-button tone follows the law in force (`CueVolumeGain`), capped
   at unity because it is mixed after the chain.
-- **Correction** (`em_eq.CORRECTION_*`, `stocksound.go`): picked by ear on
+- **Correction** (`em_eq.CORRECTION_*`, biscuit's `Voicing`): picked by ear on
   2026-10-18 between stock's curve and the measured inverse (Yeti Nano, 30cm),
   with an 80Hz high-pass and a 65Hz notch, since boosting where the driver
   cannot radiate is what distorted the first trial. A voice-plane filter
@@ -260,8 +265,8 @@ this driver and nothing else.
   reset the old Speech/Music presets: they were partial driver corrections
   and stacked +4-8dB at 250Hz on this one.
 
-Python (`em_eq`, `em_mbc`, `em_volume`) is the reference and Go is held
-bit-exact to it by `outchain/testdata` vectors; regenerate with
+Python (`em_eq`, `em_mbc`, `em_volume`) is the reference, with biscuit's
+numbers, and Go is held bit-exact to it by `outchain/testdata` vectors; regenerate with
 `gen_vectors.py` after any change to either. The model, captures and stock's
 own files that informed it stay off the repo (Amazon's).
 

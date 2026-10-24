@@ -167,6 +167,9 @@ type PcmSpeaker struct {
 	volLevel  atomic.Int64
 	stock     atomic.Bool
 	stockWide []float64
+	// voicing is the board's (nil for none); the chain never puts the
+	// stock-sound law in force without one.
+	voicing *board.Voicing
 	// voiceFilter: the stock-sound profile's voice plane (stockPeriod).
 	voiceFilter *outchain.VoiceFilter
 	// response is a relative gain on the voice plane before it is mixed with
@@ -275,13 +278,14 @@ func NewPcmSpeaker(echoTap func([]byte), levelTap func(rms float64)) (*PcmSpeake
 		deadCh:        make(chan struct{}),
 		echoTap:       echoTap,
 		levelTap:      levelTap,
-		chain:         outchain.NewFor(48000, guardBand(board.CurrentLayout().Speaker.BassGuard)),
+		voicing:       board.CurrentLayout().Speaker.Voicing,
+		chain:         outchain.NewFor(48000, guardBand(board.CurrentLayout().Speaker.BassGuard), board.CurrentLayout().Speaker.Voicing),
 		chainParams:   outchain.DefaultParams(),
 		chainBuf:      make([]byte, periodBytes),
 		srcBuf:        make([]byte, periodBytes),
 		responseMix:   make([]float64, periodSize*2),
 		stockWide:     make([]float64, periodSize*2),
-		voiceFilter:   outchain.NewVoiceFilter(48000),
+		voiceFilter:   outchain.NewVoiceFilter(48000, board.CurrentLayout().Speaker.Voicing),
 		responseGains: make([]float64, periodSize),
 	}
 	s.voice = newAudioStream(audioChanDepth, s.deadCh)
@@ -941,14 +945,19 @@ func (p *PcmSpeaker) SetVolume(level int) {
 func (p *PcmSpeaker) applyVolumeLaw() {
 	level := int(p.volLevel.Load())
 	if p.stock.Load() {
-		p.vol.set(StockVolumeGain(level))
+		p.vol.set(StockVolumeGain(level, p.voicing.CeilingDb))
 	} else {
 		p.vol.set(VolumeGain(level))
 	}
 }
 
-// StockLaw reports whether the stock-sound volume law is in force.
-func (p *PcmSpeaker) StockLaw() bool { return p.stock.Load() }
+// CueGain is the volume tone's gain for a level under the law in force.
+func (p *PcmSpeaker) CueGain(level int) float64 {
+	if p.stock.Load() {
+		return CueVolumeGain(level, p.voicing)
+	}
+	return CueVolumeGain(level, nil)
+}
 
 // refreshStock decides whether the stock-sound law and order are in force:
 // the chain runs on this device, its params ask for the profile, and no plug
