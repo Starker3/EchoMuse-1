@@ -1387,6 +1387,9 @@ static const char *serialno(void)
  * product. Matched exactly, with serial_copy's rules for idme's trailing NUL.
  * Anything else is biscuit, which every emOS image before radar assumed. */
 #define RADAR_TYPE_ID "A7WXQPH584YP"
+#define DONUT_TYPE_ID "A32DOYMUN6DTXA"
+
+enum board { BOARD_BISCUIT, BOARD_RADAR, BOARD_DONUT };
 
 static int idme_type_is(const char *raw, const char *id)
 {
@@ -1394,23 +1397,33 @@ static int idme_type_is(const char *raw, const char *id)
     return serial_copy(raw, got, sizeof got) && strcmp(got, id) == 0;
 }
 
-static int board_is_radar(void)
+static enum board board_of(const char *raw)
 {
-    static int known, radar;
+    if (idme_type_is(raw, RADAR_TYPE_ID))
+        return BOARD_RADAR;
+    if (idme_type_is(raw, DONUT_TYPE_ID))
+        return BOARD_DONUT;
+    return BOARD_BISCUIT;
+}
+
+static enum board board(void)
+{
+    static int known;
+    static enum board b;
     if (known)
-        return radar;
+        return b;
     known = 1;
     char raw[64];
     int fd = open("/proc/idme/device_type_id", O_RDONLY);
     if (fd < 0)
-        return 0;
+        return b;
     ssize_t n = read(fd, raw, sizeof raw - 1);
     close(fd);
     if (n <= 0)
-        return 0;
+        return b;
     raw[n] = 0;
-    radar = idme_type_is(raw, RADAR_TYPE_ID);
-    return radar;
+    b = board_of(raw);
+    return b;
 }
 
 static void usbwr(const char *leaf, const char *val)
@@ -2099,6 +2112,40 @@ static void wpa_ctrl_dir(const char *conf, char *out, size_t n)
     }
 }
 
+/* The Dot 3's WiFi is an MT7668 on SDIO: two kernel modules and no WMT
+ * stack, so no wmt_loader, no launcher and no /dev/wmtWifi. Under FireOS
+ * its init loads them; under emOS nothing does.
+ *
+ * The firmware path is set FIRST. Without it the driver's direct load fails
+ * -2 and the kernel falls back to the user helper, which waits out its
+ * timeout once per file with nobody to answer (41C8, 2026-10-24). Never
+ * unload mid-probe: an rmmod then panicked the kernel. */
+#define SDIO_FW_DIR "/system/vendor/firmware"
+
+static int sdio_wifi_bringup(void)
+{
+    static const char *const mods[] = {
+        "/system/lib/modules/wlan_mt76x8_sdio_prealloc.ko",
+        "/system/lib/modules/wlan_mt76x8_sdio.ko", NULL };
+    int r = wr("/sys/module/firmware_class/parameters/path", SDIO_FW_DIR);
+    netlog("wifi: firmware path rc=%d errno=%d\n", r, r ? errno : 0);
+    for (int i = 0; mods[i]; i++) {
+        int fd = open(mods[i], O_RDONLY | O_CLOEXEC);
+        if (fd < 0) {
+            netlog("wifi: open %s failed errno=%d\n", mods[i], errno);
+            return -1;
+        }
+        long m = syscall(SYS_finit_module, fd, "", 0);
+        int e = errno;
+        close(fd);
+        netlog("wifi: load %s rc=%ld errno=%d\n", mods[i], m, m ? e : 0);
+        /* EEXIST: already loaded, by an earlier stage or by hand. */
+        if (m && e != EEXIST)
+            return -1;
+    }
+    return 0;
+}
+
 #define UDHCPC_SCRIPT "/tmp/udhcpc.sh"
 
 /* 24 turns of a 5s loop = two minutes. */
@@ -2113,8 +2160,11 @@ static void net_main(void)
     static const char *const loaders[] = { "/system/bin/wmt_loader",
                                            "/system/vendor/bin/wmt_loader", NULL };
     const char *ldr = first_exec(loaders);
-    int vendor = access("/system/bin/6620_launcher", X_OK) != 0
-              && access("/system/vendor/bin/wmt_launcher", X_OK) == 0;
+    /* The donut has neither launcher but is a FireOS 6 userspace, so it takes
+     * the vendor layout's supplicant and DHCP. */
+    int sdio = board() == BOARD_DONUT;
+    int vendor = sdio || (access("/system/bin/6620_launcher", X_OK) != 0
+                          && access("/system/vendor/bin/wmt_launcher", X_OK) == 0);
     char *loader[] = { (char *)(ldr ? ldr : loaders[0]), NULL };
     char *launch[] = { vendor ? "/system/vendor/bin/wmt_launcher"
                               : "/system/bin/6620_launcher", "-p",
@@ -2140,7 +2190,9 @@ static void net_main(void)
                                          "/system/bin/wpa_supplicant", NULL };
     const char *sup = first_exec(supps);
     netlog("wifi tools: %s layout, loader %s, supplicant %s\n",
-           vendor ? "vendor (FireOS 6)" : "system (FireOS 5)", loader[0],
+           sdio ? "SDIO modules" : vendor ? "vendor (FireOS 6)"
+                                         : "system (FireOS 5)",
+           sdio ? "none" : loader[0],
            sup ? sup : supps[1]);
     char cflag[160] = "-c" ANDROID_WPA_CONF;
     char *supp[]   = { (char *)(sup ? sup : supps[1]), "-iwlan0", "-Dnl80211",
@@ -2182,30 +2234,35 @@ static void net_main(void)
     char *dhcp_fos6[] = { "/sbin/udhcpc", "-B", "-f", "-i", "wlan0",
                           "-s", (char *)UDHCPC_SCRIPT, NULL };
     char **dhcp = vendor ? dhcp_fos6 : dhcp_fos5;
-    int st = 0;
+    int st = 0, r;
 
-    waitpid(spawn(loader), &st, 0);
-    netlog("wmt_loader status=%d\n", st);
-    /* wmt_loader's chip detection is what registers stpwmt and stpbt. */
-    netlog("wmt: nodes after loader=%d\n", mknodes());
-
-    /* FireOS 6's wmt_launcher does not work here (see wmt_bringup above), so
-     * on that layout emOS configures the HIF and answers patch searches
-     * itself. FireOS 5's 6620_launcher is left alone: it works today on the
-     * fleet, and replacing a working path with an untested one is not a trade
-     * worth making until ours has run on hardware. */
     pid_t launcher = -1;
-    if (vendor) {
-        if (wmt_bringup("/system/vendor/firmware/", board_is_radar()))
-            netlog("wmt: bring-up failed, wlan0 will not appear\n");
+    if (sdio) {
+        if (sdio_wifi_bringup())
+            netlog("wifi: module load failed, wlan0 will not appear\n");
     } else {
-        launcher = spawn(launch);
-    }
-    sleep(2);
+        waitpid(spawn(loader), &st, 0);
+        netlog("wmt_loader status=%d\n", st);
+        /* wmt_loader's chip detection is what registers stpwmt and stpbt. */
+        netlog("wmt: nodes after loader=%d\n", mknodes());
 
-    mknodes();                          /* wmtWifi, once the chip is up */
-    int r = wr("/dev/wmtWifi", "1");
-    netlog("wmtWifi=1 rc=%d errno=%d\n", r, r ? errno : 0);
+        /* FireOS 6's wmt_launcher does not work here (see wmt_bringup
+         * above), so on that layout emOS configures the HIF and answers patch
+         * searches itself. FireOS 5's 6620_launcher is left alone: it works
+         * today on the fleet, and replacing a working path with an untested
+         * one is not a trade worth making until ours has run on hardware. */
+        if (vendor) {
+            if (wmt_bringup("/system/vendor/firmware/", board() == BOARD_RADAR))
+                netlog("wmt: bring-up failed, wlan0 will not appear\n");
+        } else {
+            launcher = spawn(launch);
+        }
+        sleep(2);
+
+        mknodes();                          /* wmtWifi, once the chip is up */
+        r = wr("/dev/wmtWifi", "1");
+        netlog("wmtWifi=1 rc=%d errno=%d\n", r, r ? errno : 0);
+    }
 
     for (int i = 0; i < 20 && access("/sys/class/net/wlan0", F_OK); i++)
         sleep(1);
