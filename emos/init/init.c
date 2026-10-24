@@ -223,12 +223,61 @@ static int mknodes(void)
  * 1 for seconds at a time. The parent only ever publishes the stage it has
  * reached into shared memory; it never writes a frame while the child lives.
  */
-/* Overridable so the ring animation can be rendered and checked off-target;
- * see emos/init/ringsim.c. */
-#ifndef LEDDIR
-#define LEDDIR "/sys/devices/soc/11007000.i2c/i2c-0/0-003f"
-#endif
+/* Found by the i2c device's name, as the firmware finds it (device/pkg/board
+ * I2CDevice): biscuit's sits at 11007000.i2c, the donut's at
+ * platform/soc/11009000.i2c, and a path that misses leaves the kernel's own
+ * animation running for ever. Biscuit's path is the fallback.
+ *
+ * LEDDIR is overridable so the ring animation can be rendered and checked
+ * off-target (emos/init/ringsim.c); defined, it is used as given. */
+#define LED_DRIVER  "is31fl3236"
+#define LED_FALLBACK "/sys/devices/soc/11007000.i2c/i2c-0/0-003f"
 #define LED_N  12
+
+static char led_dir_buf[256];
+
+/* Resolved once, in led_claim before the animator forks, so both share it. */
+static const char *led_dir(void)
+{
+    if (led_dir_buf[0])
+        return led_dir_buf;
+#ifdef LEDDIR
+    snprintf(led_dir_buf, sizeof led_dir_buf, "%s", LEDDIR);
+#else
+    int found = 0;
+    DIR *d = opendir("/sys/bus/i2c/devices");
+    struct dirent *e;
+    while (d && (e = readdir(d))) {
+        char p[256], name[64];
+        snprintf(p, sizeof p, "/sys/bus/i2c/devices/%s/name", e->d_name);
+        int fd = open(p, O_RDONLY);
+        if (fd < 0)
+            continue;
+        ssize_t n = read(fd, name, sizeof name - 1);
+        close(fd);
+        if (n <= 0)
+            continue;
+        name[n] = 0;
+        name[strcspn(name, "\n")] = 0;
+        if (strcmp(name, LED_DRIVER) == 0 && !found++)
+            snprintf(led_dir_buf, sizeof led_dir_buf,
+                     "/sys/bus/i2c/devices/%s", e->d_name);
+    }
+    if (d)
+        closedir(d);
+    if (found != 1)
+        snprintf(led_dir_buf, sizeof led_dir_buf, "%s", LED_FALLBACK);
+#endif
+    return led_dir_buf;
+}
+
+/* led_dir()/leaf, for the four attributes the ring is driven through. */
+static int led_open(const char *leaf, int flags)
+{
+    char p[300];
+    snprintf(p, sizeof p, "%s/%s", led_dir(), leaf);
+    return open(p, flags);
+}
 
 /* Defined further down; declared here so the orbit probe and the stage marks
  * can record into the boot trail and the network log. */
@@ -348,7 +397,7 @@ static void led_write(const unsigned char f[LED_N][3])
         puthex(hex + p * 6 + 2, f[i][1]);
         puthex(hex + p * 6 + 4, f[i][2]);
     }
-    int fd = open(LEDDIR "/frame", O_WRONLY);
+    int fd = led_open("frame", O_WRONLY);
     if (fd < 0)
         return;
     write(fd, hex, sizeof hex);
@@ -510,7 +559,7 @@ static void anim_render(int head_q, int still, int failed, int trail)
  * and returns -1 to start at the bottom as before. */
 static int orbit_head_pos(void)
 {
-    int fd = open(LEDDIR "/frame", O_RDONLY);
+    int fd = led_open("frame", O_RDONLY);
     if (fd < 0)
         return -1;
     char b[LED_N * 6 + 8];
@@ -642,9 +691,9 @@ static void anim_claim(void)
             break;
         usleep(20000);
     }
-    int fd = open(LEDDIR "/boot_animation", O_WRONLY);
+    int fd = led_open("boot_animation", O_WRONLY);
     if (fd >= 0) { write(fd, "0", 1); close(fd); }
-    fd = open(LEDDIR "/led_current", O_WRONLY);
+    fd = led_open("led_current", O_WRONLY);
     if (fd >= 0) { write(fd, "3", 1); close(fd); }
 }
 
@@ -720,7 +769,7 @@ static void orbit_probe(void)
 {
 #if ORBIT_PROBE
     for (int i = 0; i < 10; i++) {
-        int fd = open(LEDDIR "/frame", O_RDONLY);
+        int fd = led_open("frame", O_RDONLY);
         if (fd < 0) {
             note("orbit probe: frame unreadable errno=%d\n", errno);
             return;
@@ -746,6 +795,7 @@ static void orbit_probe(void)
 static void led_claim(void)
 {
     main_pid = getpid();
+    note("led ring at %s\n", led_dir());
     orbit_probe();
     note("orbit head at %d\n", orbit_head_pos());
 
