@@ -150,9 +150,9 @@ class _EmosIO:
     async def payload(self, arch: str) -> tuple:
         if self.override is not None:
             init_bin, sbin, version, err = select_payload(
-                self.override[0], arch, self.override[1])
+                self.override[0], arch, self.override[1], self.board)
         else:
-            init_bin, sbin, version, err = await fetch_payload(arch)
+            init_bin, sbin, version, err = await fetch_payload(arch, self.board)
         if err is not None:
             try:
                 reason = json.loads(err.text)["error"]
@@ -284,7 +284,7 @@ SBIN_BOTH_ARCHES = ("em-wifi",)
 PAYLOAD_ASSET = "emos-payload.zip"
 
 
-async def fetch_payload(arch: str) -> tuple:
+async def fetch_payload(arch: str, board: str | None = None) -> tuple:
     """Everything an emOS image needs for `arch`, from ONE release.
 
     Returns (init, sbin, version, error) — `sbin` being the /sbin tools the
@@ -338,10 +338,11 @@ async def fetch_payload(arch: str) -> tuple:
             "bad_release_asset",
             f"The payload in emOS release {version} is not usable: {e}", 502)
 
-    return select_payload(payload["files"], arch, version)
+    return select_payload(payload["files"], arch, version, board)
 
 
-def select_payload(files: dict, arch: str, version: str) -> tuple:
+def select_payload(files: dict, arch: str, version: str,
+                   board: str | None = None) -> tuple:
     """Pick the init and /sbin tools for `arch` out of a bundle's files.
 
     Split from fetch_payload so an uploaded bundle (the emOS update's
@@ -368,7 +369,8 @@ def select_payload(files: dict, arch: str, version: str) -> tuple:
             f"The {init_name} in emOS release {version} is not usable: "
             f"{'; '.join(problems)}", 502)
 
-    # The BINARIES are 32-bit kernel only, i.e. FireOS 6. init prefers
+    # The BINARIES are FireOS 6 only: a 32-bit kernel, or a board known to run
+    # FireOS 6 on an arm64 one (em_emos_build.FIREOS6_BOARDS). init prefers
     # /sbin/wpa_supplicant the moment one exists, so including those in a
     # FireOS 5 image would move the whole fleet off Amazon's working
     # supplicant as a side effect. Same for wpa_cli, which init's reassociate
@@ -378,7 +380,8 @@ def select_payload(files: dict, arch: str, version: str) -> tuple:
     # cannot change which supplicant init starts. Not fatal when missing — a
     # release predating it still builds a FireOS 5 image, exactly as before.
     sbin = {n: files[n] for n in SBIN_BOTH_ARCHES if n in files}
-    if arch == em_emos_build.ARCH_ARM:
+    if (arch == em_emos_build.ARCH_ARM
+            or board in em_emos_build.FIREOS6_BOARDS):
         missing = [n for n in SBIN_ASSETS if n not in files]
         if missing:
             # Fatal: Amazon's supplicant cannot run under emOS, so the image

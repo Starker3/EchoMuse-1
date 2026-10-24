@@ -458,6 +458,10 @@ SKIP_INITRAMFS = b"skip_initramfs\0"
 KEEP_INITRAMFS = b"keep_initramfs\0"
 # Boards whose bootloader appends skip_initramfs.
 SKIPS_INITRAMFS = {"radar", "donut"}
+# Boards whose userspace is FireOS 6 whatever their kernel: the donut runs a
+# 32-bit FireOS 6 on an arm64 kernel, so the kernel's arch, which is all the
+# reference image shows, reads it as FireOS 5 (em_emos_ota.select_payload).
+FIREOS6_BOARDS = {"radar", "donut"}
 
 
 # ── Donut: what its LK keeps of the cmdline, and when it passes a ramdisk ───
