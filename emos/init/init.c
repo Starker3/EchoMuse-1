@@ -328,9 +328,12 @@ static long mono_ms(void);
  * the orbit ever needs re-measuring, on this board or another. */
 #define ORBIT_PROBE 0
 
-/* The orbit's ring, which is also what the tail repaints it with. */
-static const unsigned char C_ORBIT[3]  = { 0x00, 0x00, 0xFF };
-static const unsigned char C_HEAD[3]   = { 0x00, 0xFF, 0xFF }; /* the orbit's head */
+/* The orbit's ring, which is also what the tail repaints it with. Biscuit's
+ * kernel draws these; the donut's draws 0000C1 and 00FFC1 (41C8,
+ * 2026-10-25), so led_claim reads both off the orbit it is taking over
+ * (orbit_learn) and these are what is used when there is none to read. */
+static unsigned char C_ORBIT[3]  = { 0x00, 0x00, 0xFF };
+static unsigned char C_HEAD[3]   = { 0x00, 0xFF, 0xFF }; /* the orbit's head */
 static const unsigned char C_FAIL[3]   = { 0xFF, 0x00, 0x00 };
 static const unsigned char C_AMBER[3]  = { 0xFF, 0x60, 0x00 };
 /* Cyan is already full on two channels, so the only way UP is toward white —
@@ -552,42 +555,76 @@ static void anim_render(int head_q, int still, int failed, int trail)
     led_write(f);
 }
 
-/* Where the kernel's orbit had got to, in logical positions, so ours can carry
- * on from there instead of jumping to the bottom. The head is whichever single
- * segment is not the ground colour; anything else — a dark ring, a frame
- * already claimed by somebody, two lit segments — is not an orbit we can join,
- * and returns -1 to start at the bottom as before. */
-static int orbit_head_pos(void)
+static int hexval(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Read the ring as 12 physical RGB triplets; 0 when `frame` cannot be read or
+ * is not 72 hex digits. */
+static int frame_read(unsigned char f[LED_N][3])
 {
     int fd = led_open("frame", O_RDONLY);
     if (fd < 0)
-        return -1;
+        return 0;
     char b[LED_N * 6 + 8];
     int n = read(fd, b, sizeof b - 1);
     close(fd);
     if (n < LED_N * 6)
-        return -1;
-
-    char want[6];
-    puthex(want,     C_ORBIT[0]);
-    puthex(want + 2, C_ORBIT[1]);
-    puthex(want + 4, C_ORBIT[2]);
-
-    int found = -1, count = 0;
-    for (int L = 0; L < LED_N; L++) {
-        int p = (LED_BOTTOM + LED_DIR * L) % LED_N;
-        if (p < 0)
-            p += LED_N;
-        int same = 1;
-        for (int k = 0; k < 6; k++) {
-            char a = b[p * 6 + k], w = want[k];
-            if (a >= 'a' && a <= 'f') a -= 32;   /* the kernel prints lower */
-            if (w >= 'a' && w <= 'f') w -= 32;
-            if (a != w) { same = 0; break; }
-        }
-        if (!same) { found = L; count++; }
+        return 0;
+    for (int i = 0; i < LED_N * 3; i++) {
+        int hi = hexval(b[i * 2]), lo = hexval(b[i * 2 + 1]);
+        if (hi < 0 || lo < 0)
+            return 0;
+        f[i / 3][i % 3] = (unsigned char)(hi << 4 | lo);
     }
-    return count == 1 ? found : -1;
+    return 1;
+}
+
+/* The kernel's orbit is eleven segments of one colour and one of another.
+ * Returns the PHYSICAL index of the odd one out, or -1 for anything else — a
+ * dark ring, a frame already claimed by somebody, two lit segments. */
+static int orbit_odd_one(const unsigned char f[LED_N][3])
+{
+    /* The ground is whichever colour two of the first three share. */
+    int g = memcmp(f[0], f[1], 3) == 0 || memcmp(f[0], f[2], 3) == 0 ? 0 : 1;
+    int odd = -1, count = 0;
+    for (int p = 0; p < LED_N; p++)
+        if (memcmp(f[p], f[g], 3) != 0) { odd = p; count++; }
+    return count == 1 ? odd : -1;
+}
+
+/* Take the orbit's two colours off the ring itself, so the continuation is
+ * drawn in whatever blues this board's kernel uses. */
+static void orbit_learn(void)
+{
+    unsigned char f[LED_N][3];
+    if (!frame_read(f))
+        return;
+    int odd = orbit_odd_one(f);
+    if (odd < 0)
+        return;
+    memcpy(C_HEAD, f[odd], 3);
+    memcpy(C_ORBIT, f[(odd + 1) % LED_N], 3);
+    note("orbit colours %02x%02x%02x head %02x%02x%02x\n", C_ORBIT[0],
+         C_ORBIT[1], C_ORBIT[2], C_HEAD[0], C_HEAD[1], C_HEAD[2]);
+}
+
+/* Where the kernel's orbit had got to, in logical positions, so ours can carry
+ * on from there instead of jumping to the bottom; -1 when there is no orbit
+ * to join, which starts at the bottom as before. */
+static int orbit_head_pos(void)
+{
+    unsigned char f[LED_N][3];
+    if (!frame_read(f))
+        return -1;
+    int p = orbit_odd_one(f);
+    if (p < 0)
+        return -1;
+    return ((p - LED_BOTTOM) * LED_DIR % LED_N + LED_N) % LED_N;
 }
 
 /* Boot complete: close the ring, fill both sides from the bottom to the top,
@@ -796,6 +833,7 @@ static void led_claim(void)
 {
     main_pid = getpid();
     note("led ring at %s\n", led_dir());
+    orbit_learn();
     orbit_probe();
     note("orbit head at %d\n", orbit_head_pos());
 
