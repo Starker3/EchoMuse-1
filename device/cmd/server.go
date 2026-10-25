@@ -103,6 +103,10 @@ func main() {
 	// is rolled back before anything tries to use the network — same
 	// self-healing philosophy as the A/B binary slots.
 	wifi.RecoverIfPending()
+	// Where the board states a DHCP service (the Dot 3 on FireOS): joined
+	// but no address for 20s clears the lease and asks again
+	// (internal/wifi/dhcpwatch.go).
+	go wifi.WatchDHCP()
 
 	// Amazon's WiFi Simple Setup daemon (BLE+WiFi provisioning of
 	// neighbouring Amazon devices) is useless on a repurposed device and
